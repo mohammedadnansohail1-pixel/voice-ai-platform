@@ -1,0 +1,139 @@
+# Appointment Scheduling Flow
+name: appointment_scheduling
+version: "1.0"
+description: Schedule medical appointments
+
+initial_state: greeting
+
+context_defaults:
+  clinic_name: "Sunrise Medical Clinic"
+
+global_fallback: "I'm having trouble understanding. Let me transfer you to our staff."
+
+states:
+  greeting:
+    type: speak
+    message: "Thank you for calling {clinic_name}. How can I help you today?"
+    next: detect_intent
+
+  detect_intent:
+    type: listen
+    intents:
+      schedule:
+        patterns: ["appointment", "schedule", "book", "see doctor", "visit"]
+        next: ask_reason
+      cancel:
+        patterns: ["cancel", "remove", "delete"]
+        next: handle_cancel
+      reschedule:
+        patterns: ["reschedule", "change", "move"]
+        next: handle_reschedule
+      hours:
+        patterns: ["hours", "open", "when"]
+        next: tell_hours
+    fallback_message: "I can help you schedule, cancel, or reschedule an appointment. What would you like to do?"
+    max_retries: 2
+
+  ask_reason:
+    type: speak_and_listen
+    message: "I'd be happy to help you schedule an appointment. What's the reason for your visit?"
+    slots:
+      - name: visit_reason
+        type: string
+    intents:
+      any:
+        patterns: []
+        next: ask_preferred_day
+    fallback_message: "Could you briefly describe why you need to see the doctor?"
+
+  ask_preferred_day:
+    type: speak_and_listen
+    message: "Got it. What day works best for you?"
+    slots:
+      - name: preferred_day
+        type: string
+    intents:
+      any:
+        patterns: []
+        next: ask_preferred_time
+
+  ask_preferred_time:
+    type: speak_and_listen
+    message: "And do you prefer morning or afternoon?"
+    slots:
+      - name: preferred_time
+        type: string
+    intents:
+      morning:
+        patterns: ["morning", "am", "early"]
+        next: check_availability
+      afternoon:
+        patterns: ["afternoon", "pm", "later"]
+        next: check_availability
+      any:
+        patterns: []
+        next: check_availability
+
+  check_availability:
+    type: action
+    action: calendar.check_slots
+    action_params:
+      day: "{slots.preferred_day}"
+      time: "{slots.preferred_time}"
+    on_success: offer_slot
+    on_failure: no_availability
+
+  offer_slot:
+    type: speak_and_listen
+    message: "I have an opening on {slots.preferred_day} at 10:00 AM. Does that work for you?"
+    intents:
+      confirm:
+        patterns: ["yes", "sure", "okay", "that works", "perfect", "great"]
+        next: confirm_booking
+      deny:
+        patterns: ["no", "doesn't work", "different", "another"]
+        next: ask_preferred_day
+
+  confirm_booking:
+    type: speak
+    message: "Your appointment is confirmed for {slots.preferred_day}. You'll receive a confirmation text shortly."
+    next: closing
+
+  no_availability:
+    type: speak
+    message: "I'm sorry, we don't have availability at that time. Let me check other options."
+    next: ask_preferred_day
+
+  handle_cancel:
+    type: speak
+    message: "To cancel an appointment, I'll need to transfer you to our scheduling desk. One moment please."
+    next: end_transfer
+
+  handle_reschedule:
+    type: speak
+    message: "To reschedule, I'll need to transfer you to our scheduling desk. One moment please."
+    next: end_transfer
+
+  tell_hours:
+    type: speak
+    message: "We're open Monday through Friday, 8 AM to 5 PM, and Saturday 9 AM to 1 PM."
+    next: anything_else
+
+  anything_else:
+    type: speak_and_listen
+    message: "Is there anything else I can help you with?"
+    intents:
+      "yes":
+        patterns: ["yes", "yeah", "another", "one more"]
+        next: detect_intent
+      "no":
+        patterns: ["no", "that's all", "nothing", "goodbye", "bye"]
+        next: closing
+
+  closing:
+    type: end
+    message: "Thank you for calling {clinic_name}. Have a great day!"
+
+  end_transfer:
+    type: end
+    message: "Transferring you now. Goodbye."

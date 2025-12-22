@@ -1,0 +1,63 @@
+# Voice AI Platform - Base Configuration
+
+tenant:
+  id: default
+  name: "Default Tenant"
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_duration_ms: 30
+
+vad:
+  backend: silero
+  threshold: 0.5
+  min_speech_ms: 250
+  min_silence_ms: 500
+  max_speech_s: 30.0
+
+asr:
+  backend: whisper
+  model: large-v3
+  device: cuda
+  compute_type: float16
+
+llm:
+  provider: ollama
+  model: llama3.2
+  base_url: http://localhost:11434
+  temperature: 0.7
+  max_tokens: 200
+  system_prompt: |
+    You are a helpful voice assistant. Keep responses brief and conversational.
+    Respond in 1-2 sentences when possible.
+
+tts:
+  backend: kokoro
+  voice: af_sarah
+  device: cuda
+  voices:
+    en: af_sarah
+    ar: ar_JO-kareem-medium
+    hi: hi_IN-pratham-medium
+
+barge_in:
+  enabled: true
+  grace_period_ms: 500
+  similarity_threshold: 0.5
+  energy_threshold: 0.03
+
+channels:
+  enabled:
+    - local_mic
+
+logging:
+  level: INFO
+  format: console
+  audit_enabled: true
+  audit_redact_phi: true
+  audit_path: logs/audit
+
+metrics:
+  enabled: true
+  port: 9090
