@@ -1,21 +1,20 @@
-"""Run the Voice AI server."""
+#!/usr/bin/env python3
+"""Run the voice platform API server."""
 import sys
-sys.path.insert(0, 'src')
+import os
+
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import uvicorn
-from voice_platform.api.server import create_app
-from voice_platform.logging import setup_logging
-from voice_platform.core.config import LoggingConfig
+from voice_platform.api import create_app
+
+app = create_app("configs/base.yaml")
 
 if __name__ == "__main__":
-    setup_logging(LoggingConfig(level="INFO", format="console"))
-    
-    app = create_app(flow_path="configs/flows/appointment.yaml")
-    
-    print("\n" + "="*50)
-    print("🎙️  Voice AI Platform")
-    print("="*50)
-    print("Open in browser: http://localhost:8000")
-    print("="*50 + "\n")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+    )

@@ -15,17 +15,18 @@ class WhisperASR(ASRBackend):
     
     def __init__(
         self,
-        model: str = "large-v3",
+        model: str = "large-v3-turbo",
         device: str = "cuda",
         compute_type: str = "float16",
+        language: str = "en",  # Force English
     ):
         self.model_name = model
         self.device = device
         self.compute_type = compute_type
+        self.language = language
         self._model = None
     
     def load(self) -> None:
-        """Load the Whisper model."""
         if self._model is not None:
             return
         
@@ -45,34 +46,31 @@ class WhisperASR(ASRBackend):
         sample_rate: int = 16000,
         language: Optional[str] = None,
     ) -> TranscriptionResult:
-        """Transcribe audio to text."""
         if not self.is_loaded:
             self.load()
         
-        # Ensure float32
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
         
-        # Normalize if needed
         if np.abs(audio).max() > 1.0:
             audio = audio / np.abs(audio).max()
         
-        # Transcribe
+        # Use provided language or default
+        use_language = language or self.language
+        
         segments, info = self._model.transcribe(
             audio,
-            language=language,
+            language=use_language,
             beam_size=5,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
         )
         
-        # Collect text
         text_parts = []
         for segment in segments:
             text_parts.append(segment.text.strip())
         
         text = " ".join(text_parts)
-        
         duration = len(audio) / sample_rate
         
         logger.debug("transcribed", text=text[:50], language=info.language)

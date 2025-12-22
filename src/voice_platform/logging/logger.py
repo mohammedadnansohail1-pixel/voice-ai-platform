@@ -1,6 +1,6 @@
 """Structured logging setup."""
-import logging
 import sys
+import logging
 import structlog
 from typing import Optional
 
@@ -12,8 +12,12 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
     if config is None:
         config = LoggingConfig()
     
-    # Convert string level to int
-    log_level = getattr(logging, config.level.upper(), logging.INFO)
+    # Set root logger level
+    logging.basicConfig(
+        level=getattr(logging, config.level.upper(), logging.INFO),
+        format="%(message)s",
+        stream=sys.stdout,
+    )
     
     # Processors for all log entries
     processors = [
@@ -30,7 +34,9 @@ def setup_logging(config: Optional[LoggingConfig] = None) -> None:
     
     structlog.configure(
         processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(log_level),
+        wrapper_class=structlog.make_filtering_bound_logger(
+            getattr(logging, config.level.upper(), logging.INFO)
+        ),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
         cache_logger_on_first_use=True,

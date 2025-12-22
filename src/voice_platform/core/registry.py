@@ -1,50 +1,100 @@
-"""Component registry pattern for plug-and-play backends."""
-from typing import Dict, Type, TypeVar, Generic, Any
+"""
+Voice AI Platform - Component Registry
 
-T = TypeVar('T')
+Enables pluggable backends for VAD, ASR, TTS, LLM via decorators.
+"""
+
+from typing import Any, Callable, Dict, Optional, Type, TypeVar
+
+from .exceptions import ModelNotFoundError
+
+T = TypeVar("T")
 
 
-class Registry(Generic[T]):
+class Registry:
     """
-    Generic registry for component types.
+    Generic registry for pluggable components.
     
     Usage:
-        asr_registry = Registry[ASRBackend]("ASR")
+        vad_registry = Registry("vad")
         
-        @asr_registry.register("whisper")
-        class WhisperASR(ASRBackend):
+        @vad_registry.register("silero")
+        class SileroVAD:
             ...
         
         # Later
-        asr = asr_registry.create("whisper", model="large-v3")
+        vad_class = vad_registry.get("silero")
+        vad = vad_class(config)
     """
     
-    def __init__(self, name: str):
-        self.name = name
-        self._registry: Dict[str, Type[T]] = {}
+    _registries: Dict[str, "Registry"] = {}
     
-    def register(self, key: str):
-        """Decorator to register a component class."""
+    def __init__(self, category: str) -> None:
+        self.category = category
+        self._backends: Dict[str, Type[Any]] = {}
+        Registry._registries[category] = self
+    
+    def register(self, name: str) -> Callable[[Type[T]], Type[T]]:
+        """Decorator to register a backend."""
         def decorator(cls: Type[T]) -> Type[T]:
-            self._registry[key] = cls
+            self._backends[name] = cls
             return cls
         return decorator
     
-    def get(self, key: str) -> Type[T]:
-        """Get component class by key."""
-        if key not in self._registry:
-            available = ", ".join(self._registry.keys())
-            raise KeyError(f"Unknown {self.name}: '{key}'. Available: {available}")
-        return self._registry[key]
+    def get(self, name: str) -> Type[Any]:
+        """Get a registered backend by name."""
+        if name not in self._backends:
+            raise ModelNotFoundError(
+                category=self.category,
+                backend=name,
+            )
+        return self._backends[name]
     
-    def create(self, key: str, **kwargs: Any) -> T:
-        """Create component instance."""
-        cls = self.get(key)
-        return cls(**kwargs)
+    def list_backends(self) -> list[str]:
+        """List all registered backends."""
+        return list(self._backends.keys())
     
-    def list_available(self) -> list[str]:
-        """List all registered component keys."""
-        return list(self._registry.keys())
+    def has(self, name: str) -> bool:
+        """Check if a backend is registered."""
+        return name in self._backends
     
-    def __contains__(self, key: str) -> bool:
-        return key in self._registry
+    @classmethod
+    def get_registry(cls, category: str) -> Optional["Registry"]:
+        """Get a registry by category."""
+        return cls._registries.get(category)
+    
+    @classmethod
+    def list_registries(cls) -> list[str]:
+        """List all registry categories."""
+        return list(cls._registries.keys())
+
+
+# Pre-defined registries for each component type
+vad_registry = Registry("vad")
+asr_registry = Registry("asr")
+tts_registry = Registry("tts")
+llm_registry = Registry("llm")
+channel_registry = Registry("channel")
+
+
+def get_component(category: str, backend: str, config: Any = None) -> Any:
+    """
+    Factory function to instantiate a component.
+    
+    Args:
+        category: Component category (vad, asr, tts, llm, channel)
+        backend: Backend name (silero, whisper, kokoro, etc.)
+        config: Configuration to pass to the backend
+    
+    Returns:
+        Instantiated component
+    """
+    registry = Registry.get_registry(category)
+    if registry is None:
+        raise ModelNotFoundError(category=category, backend=None)
+    
+    backend_class = registry.get(backend)
+    
+    if config is not None:
+        return backend_class(config)
+    return backend_class()

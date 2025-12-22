@@ -1,18 +1,44 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-.env
-.venv/
+*.so
+.Python
 venv/
+.venv/
 *.egg-info/
 dist/
 build/
-.eggs/
-*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
 logs/
+*.log
+
+# Audio files
 *.wav
 *.mp3
+
+# Models (downloaded at runtime)
+*.pt
+*.onnx
+*.bin
+
+# Environment
+.env
+.env.*
+
+# OS
 .DS_Store
-.idea/
-.vscode/
-*.swp
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+src_backup_20251222/

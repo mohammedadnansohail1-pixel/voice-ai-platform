@@ -1,6 +1,89 @@
 """Core infrastructure."""
 from .config import Config, load_config
-from .registry import Registry
-from .exceptions import VoicePlatformError
+from .registry import (
+    Registry,
+    vad_registry,
+    asr_registry,
+    tts_registry,
+    llm_registry,
+    channel_registry,
+    get_component,
+)
+from .exceptions import (
+    VoicePlatformError,
+    ConfigError,
+    ConfigNotFoundError,
+    ConfigValidationError,
+    ModelError,
+    ModelNotFoundError,
+    ModelLoadError,
+    ModelInferenceError,
+    AudioError,
+    AudioFormatError,
+    AudioProcessingError,
+    SessionError,
+    SessionNotFoundError,
+    SessionLimitError,
+    SessionTimeoutError,
+    ChannelError,
+    ChannelNotFoundError,
+    ChannelConnectionError,
+    ChannelDisconnectedError,
+    get_http_status,
+)
+from .types import (
+    SessionState,
+    ChannelType,
+    AudioChunk,
+    TranscriptSegment,
+    Transcript,
+    LLMMessage,
+    LLMResponse,
+    TTSResult,
+    SessionContext,
+)
 
-__all__ = ["Config", "load_config", "Registry", "VoicePlatformError"]
+__all__ = [
+    # Config
+    "Config",
+    "load_config",
+    # Registry
+    "Registry",
+    "vad_registry",
+    "asr_registry",
+    "tts_registry",
+    "llm_registry",
+    "channel_registry",
+    "get_component",
+    # Exceptions
+    "VoicePlatformError",
+    "ConfigError",
+    "ConfigNotFoundError",
+    "ConfigValidationError",
+    "ModelError",
+    "ModelNotFoundError",
+    "ModelLoadError",
+    "ModelInferenceError",
+    "AudioError",
+    "AudioFormatError",
+    "AudioProcessingError",
+    "SessionError",
+    "SessionNotFoundError",
+    "SessionLimitError",
+    "SessionTimeoutError",
+    "ChannelError",
+    "ChannelNotFoundError",
+    "ChannelConnectionError",
+    "ChannelDisconnectedError",
+    "get_http_status",
+    # Types
+    "SessionState",
+    "ChannelType",
+    "AudioChunk",
+    "TranscriptSegment",
+    "Transcript",
+    "LLMMessage",
+    "LLMResponse",
+    "TTSResult",
+    "SessionContext",
+]

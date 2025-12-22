@@ -1,13 +1,13 @@
 # Voice AI Platform - Base Configuration
 
 tenant:
-  id: default
-  name: "Default Tenant"
+  id: dev
+  name: Development
 
 audio:
   sample_rate: 16000
   channels: 1
-  chunk_duration_ms: 30
+  chunk_duration_ms: 32  # Exactly 512 samples for Silero VAD
 
 vad:
   backend: silero
@@ -21,6 +21,7 @@ asr:
   model: large-v3
   device: cuda
   compute_type: float16
+  language: null  # auto-detect
 
 llm:
   provider: ollama
@@ -29,7 +30,8 @@ llm:
   temperature: 0.7
   max_tokens: 200
   system_prompt: |
-    You are a helpful voice assistant. Keep responses brief and conversational.
+    You are a helpful voice assistant.
+    Keep responses brief and conversational.
     Respond in 1-2 sentences when possible.
 
 tts:
@@ -50,6 +52,10 @@ barge_in:
 channels:
   enabled:
     - local_mic
+
+telephony:
+  enabled: false
+  provider: twilio
 
 logging:
   level: INFO
