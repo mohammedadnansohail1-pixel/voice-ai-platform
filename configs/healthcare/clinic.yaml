@@ -1,0 +1,54 @@
+# Healthcare Voice AI Configuration
+# All settings are config-driven, no hardcoded values in code
+
+clinic:
+  name: "Sunrise Medical"  # Override per deployment
+  phone: "(555) 123-4567"
+  address: "123 Main Street, Suite 100"
+  
+hours:
+  monday: { open: "08:00", close: "17:00" }
+  tuesday: { open: "08:00", close: "17:00" }
+  wednesday: { open: "08:00", close: "17:00" }
+  thursday: { open: "08:00", close: "17:00" }
+  friday: { open: "08:00", close: "17:00" }
+  saturday: { open: "09:00", close: "13:00" }
+  sunday: null  # Closed
+
+# Default slots - in production, fetch from PMS/EHR API
+available_slots:
+  - { day: "Tuesday", time: "2:00 PM" }
+  - { day: "Tuesday", time: "4:30 PM" }
+  - { day: "Wednesday", time: "10:00 AM" }
+  - { day: "Wednesday", time: "3:00 PM" }
+  - { day: "Thursday", time: "9:00 AM" }
+  - { day: "Thursday", time: "3:00 PM" }
+  - { day: "Friday", time: "11:00 AM" }
+  - { day: "Friday", time: "2:30 PM" }
+
+verification:
+  enabled: true
+  required_fields:
+    - date_of_birth
+  min_verified: 2
+  max_attempts_per_field: 3
+  lockout_minutes: 30
+
+review:
+  confidence_threshold: 0.8
+  critical_threshold: 0.5
+  sample_rate: 0.05
+  auto_approve_on_expiry: false
+
+extraction:
+  enable_medical_ner: true
+  enable_clinical_extraction: true
+  enable_phi_detection: true
+  redaction_strategy: "label"  # label, mask, placeholder, remove, partial
+
+# Slot providers - in production, integrate with real APIs
+slot_provider:
+  type: "static"  # static, api, database
+  # For API provider:
+  # api_url: "https://ehr.clinic.com/api/slots"
+  # api_key_env: "EHR_API_KEY"

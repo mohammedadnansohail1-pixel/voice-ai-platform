@@ -71,3 +71,11 @@ select = ["E", "F", "W", "I", "N", "UP", "B"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# Add to dependencies (run pip install after):
+# pip install -e ~/projects/shared-libs/config-core
+# pip install -e ~/projects/shared-libs/secure-core
+# pip install -e ~/projects/shared-libs/extract-core
+# pip install -e ~/projects/shared-libs/verify-core
+# pip install -e ~/projects/shared-libs/review-core
+# pip install -e ~/projects/shared-libs/domain-healthcare

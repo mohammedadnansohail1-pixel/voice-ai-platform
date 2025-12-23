@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<include>
+  <extension name="voice-ai">
+    <condition field="destination_number" expression="^(1000)$">
+      <action application="answer"/>
+      <action application="sleep" data="500"/>
+      <action application="playback" data="ivr/ivr-welcome.wav"/>
+      <action application="socket" data="172.21.237.232:8000 async full"/>
+    </condition>
+  </extension>
+</include>

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  freeswitch:
+    image: safarov/freeswitch:latest
+    container_name: freeswitch
+    network_mode: host  # Required for RTP
+    volumes:
+      - ./dialplan:/etc/freeswitch/dialplan/custom
+      - ./scripts:/usr/share/freeswitch/scripts
+    environment:
+      - SOUND_RATES=8000:16000
+      - SOUND_TYPES=wav
+    restart: unless-stopped
+
+  # Alternative: Use signalwire/freeswitch
+  # freeswitch:
+  #   image: signalwire/freeswitch:latest
+  #   ...

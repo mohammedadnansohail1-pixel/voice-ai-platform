@@ -67,3 +67,12 @@ logging:
 metrics:
   enabled: true
   port: 9090
+
+# Database
+database:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: "Adsohnan213!456"
+  database: voice_ai
+  pool_size: 5
