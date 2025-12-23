@@ -1,8 +1,11 @@
-"""Flow execution engine with LLM fallback."""
-from typing import Optional, Any
+"""Flow execution engine."""
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Optional
 
-from .models import Flow, FlowState, StateType
+from .models import Flow, FlowStep, SlotDefinition, ActionType
+from ..core.types import LLMMessage
 from ..logging import get_logger
 
 logger = get_logger("flows.engine")
@@ -10,290 +13,250 @@ logger = get_logger("flows.engine")
 
 @dataclass
 class FlowContext:
-    """Runtime context for flow execution."""
-    current_state: str
+    """Execution context for a flow."""
+    flow_name: str
+    current_step: str
     slots: dict[str, Any] = field(default_factory=dict)
     variables: dict[str, Any] = field(default_factory=dict)
     history: list[dict] = field(default_factory=list)
     retry_count: int = 0
+    started_at: datetime = field(default_factory=datetime.now)
+    
+    def set_slot(self, name: str, value: Any) -> None:
+        self.slots[name] = value
+    
+    def get_slot(self, name: str, default: Any = None) -> Any:
+        return self.slots.get(name, default)
+    
+    def get_all(self) -> dict:
+        return {**self.variables, **self.slots}
+    
+    def interpolate(self, text: str) -> str:
+        if not text:
+            return text
+        result = text
+        for key, value in self.get_all().items():
+            result = result.replace(f"{{{key}}}", str(value) if value else "")
+        return result
+
+
+class SlotExtractor:
+    """Extract slot values from user input."""
+    
+    PATTERNS = {
+        "email": r"[\w\.-]+@[\w\.-]+\.\w+",
+        "phone": r"[\+]?[(]?[0-9]{1,3}[)]?[-\s\.]?[0-9]{1,4}[-\s\.]?[0-9]{1,4}[-\s\.]?[0-9]{1,9}",
+        "date": r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        "time": r"\d{1,2}:\d{2}(?:\s*[ap]m)?|\d{1,2}\s*(?:am|pm|AM|PM)|\b(?:morning|afternoon|evening|noon)\b",
+        "number": r"\b\d+(?:\.\d+)?\b",
+    }
+    
+    def __init__(self, llm: Optional[Any] = None):
+        self.llm = llm
+    
+    def extract(self, user_input: str, slot: SlotDefinition, context: FlowContext) -> Optional[Any]:
+        text = user_input.strip()
+        text_lower = text.lower()
+        
+        for pattern in slot.patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(0)
+        
+        if slot.type in self.PATTERNS:
+            match = re.search(self.PATTERNS[slot.type], text, re.IGNORECASE)
+            if match:
+                return match.group(0)
+        
+        if slot.type == "choice" and slot.choices:
+            for choice in slot.choices:
+                if choice.lower() in text_lower:
+                    return choice
+        
+        if slot.type == "string":
+            return text if text else None
+        
+        if self.llm:
+            return self._extract_with_llm(user_input, slot, context)
+        
+        return None
+    
+    def _extract_with_llm(self, user_input: str, slot: SlotDefinition, context: FlowContext) -> Optional[str]:
+        prompt = f"""Extract the {slot.name} from: "{user_input}"
+Type: {slot.type}
+{"Choices: " + ", ".join(slot.choices) if slot.choices else ""}
+Return ONLY the value or "NONE"."""
+        
+        messages = [LLMMessage(role="user", content=prompt)]
+        response = self.llm.generate(messages, max_tokens=50)
+        result = response.content.strip()
+        return None if result == "NONE" else result
 
 
 @dataclass
-class EngineResponse:
-    """Response from the flow engine."""
-    message: Optional[str] = None
-    needs_input: bool = False
-    ended: bool = False
-    action_request: Optional[str] = None
-    current_state: str = ""
-    slots: dict[str, Any] = field(default_factory=dict)
+class FlowResult:
+    """Result of a flow step execution."""
+    say: Optional[str] = None
+    listen: bool = False
+    next_step: Optional[str] = None
+    end_flow: bool = False
+    action: Optional[ActionType] = None
+    action_params: dict = field(default_factory=dict)
 
 
 class FlowEngine:
-    """Execute conversation flows with LLM-first approach."""
+    """Execute conversation flows."""
     
-    def __init__(self, flow: Flow, llm=None):
-        self.flow = flow
-        self.context = FlowContext(
-            current_state=flow.initial_state,
-            variables=dict(flow.context_defaults),
-        )
-        self.llm = llm
-        self._pending_action: Optional[str] = None
+    def __init__(
+        self,
+        flows: dict[str, Flow],
+        llm: Optional[Any] = None,
+        action_handlers: dict[ActionType, Callable] = None,
+    ):
+        self.flows = flows
+        self.extractor = SlotExtractor(llm)
+        self.action_handlers = action_handlers or {}
+        self.contexts: dict[str, FlowContext] = {}
+        logger.info("flow_engine_initialized", flows=list(flows.keys()))
     
-    def set_llm(self, llm) -> None:
-        self.llm = llm
+    def start_flow(self, session_id: str, flow_name: str) -> FlowResult:
+        if flow_name not in self.flows:
+            return FlowResult(say="Sorry, I couldn't start that conversation.", end_flow=True)
+        
+        flow = self.flows[flow_name]
+        context = FlowContext(flow_name=flow_name, current_step=flow.initial_step)
+        self.contexts[session_id] = context
+        
+        logger.info("flow_started", session=session_id[:8], flow=flow_name)
+        return self._execute_step(session_id)
     
-    def start(self) -> EngineResponse:
-        logger.info("flow_started", flow=self.flow.name, initial_state=self.context.current_state)
-        return self._execute_current_state()
+    def process_input(self, session_id: str, user_input: str) -> FlowResult:
+        if session_id not in self.contexts:
+            return FlowResult(say="No active conversation.", end_flow=True)
+        
+        context = self.contexts[session_id]
+        flow = self.flows[context.flow_name]
+        step = flow.get_step(context.current_step)
+        
+        if not step:
+            return FlowResult(say="Something went wrong.", end_flow=True)
+        
+        # Store input for conditions
+        context.variables["last_input"] = user_input.lower()
+        context.history.append({
+            "step": context.current_step,
+            "input": user_input,
+            "timestamp": datetime.now().isoformat(),
+        })
+        
+        # Extract slots if needed
+        for slot in step.extract:
+            value = self.extractor.extract(user_input, slot, context)
+            if value:
+                context.set_slot(slot.name, value)
+                logger.debug("slot_extracted", slot=slot.name, value=value)
+            elif slot.required:
+                context.retry_count += 1
+                if context.retry_count <= step.retries:
+                    prompt = slot.prompt or f"I didn't catch that. What is your {slot.name}?"
+                    return FlowResult(say=context.interpolate(prompt), listen=True)
+                else:
+                    if slot.default is not None:
+                        context.set_slot(slot.name, slot.default)
+                    context.retry_count = 0
+        
+        context.retry_count = 0
+        
+        # Move to next step then evaluate conditions there
+        if step.next_step:
+            context.current_step = step.next_step
+        
+        return self._execute_step(session_id)
     
-    def process_input(self, user_input: str) -> EngineResponse:
-        state = self._get_current_state()
+    def _execute_step(self, session_id: str) -> FlowResult:
+        context = self.contexts[session_id]
+        flow = self.flows[context.flow_name]
+        step = flow.get_step(context.current_step)
         
-        if not state:
-            return EngineResponse(ended=True, current_state=self.context.current_state)
+        if not step:
+            return FlowResult(say="Something went wrong.", end_flow=True)
         
-        logger.info("user_input", input=user_input, state=self.context.current_state)
-        self.context.history.append({"role": "user", "content": user_input})
+        logger.debug("executing_step", step=step.id)
         
-        # Extract slots with LLM FIRST
-        if self.llm:
-            extracted_slots = self._extract_slots_with_llm(user_input, state)
-            for slot_name, value in extracted_slots.items():
-                if value:
-                    self.context.slots[slot_name] = value
-                    logger.info("slot_filled", slot=slot_name, value=value)
-        
-        # Match intent (LLM first, then keywords)
-        matched_intent, next_state = self._match_intent(user_input, state)
-        
-        if matched_intent:
-            logger.info("intent_matched", intent=matched_intent, next_state=next_state)
-            self.context.retry_count = 0
-            self.context.current_state = next_state
-            return self._execute_current_state()
-        
-        # No match - handle retry
-        self.context.retry_count += 1
-        
-        if self.context.retry_count >= state.max_retries:
-            logger.info("max_retries_reached", fallback=self.flow.global_fallback)
-            return EngineResponse(
-                message=self.flow.global_fallback,
-                ended=True,
-                current_state=self.context.current_state,
-                slots=self.context.slots,
-            )
-        
-        return EngineResponse(
-            message=self._interpolate(state.fallback_message),
-            needs_input=True,
-            current_state=self.context.current_state,
-            slots=self.context.slots,
-        )
-    
-    def _match_intent(self, user_input: str, state: FlowState) -> tuple[Optional[str], Optional[str]]:
-        """Match user input to an intent. LLM first, then keywords."""
-        
-        # Get available intents (excluding "any")
-        intent_names = [name for name in state.intents.keys() if name != "any"]
-        
-        # Try LLM classification FIRST if available and we have intents
-        if self.llm and intent_names:
-            llm_intent = self.llm.classify_intent(
-                user_input,
-                intent_names,
-                context=self._get_context_summary()
-            )
-            if llm_intent and llm_intent in state.intents:
-                return llm_intent, state.intents[llm_intent].next
-        
-        # Fall back to keyword matching (only if LLM didn't match)
-        if not self.llm:
-            user_lower = user_input.lower()
-            
-            # Check for negation - skip keyword match if user says "can't", "don't", "not"
-            has_negation = any(neg in user_lower for neg in ["can't", "cannot", "don't", "not ", "no "])
-            
-            if not has_negation:
-                for intent_name, intent in state.intents.items():
-                    if intent_name == "any":
-                        continue
-                    for pattern in intent.patterns:
-                        if pattern.lower() in user_lower:
-                            return intent_name, intent.next
-        
-        # Check for catch-all "any" intent
-        if "any" in state.intents:
-            return "any", state.intents["any"].next
-        
-        return None, None
-    
-    def _extract_slots_with_llm(self, user_input: str, state: FlowState) -> dict[str, str]:
-        """Extract slots using LLM."""
-        if not self.llm:
-            return {}
-        
-        # Build slot descriptions
-        slots_to_extract = {}
-        
-        # From current state
-        for slot in state.slots:
-            slots_to_extract[slot.name] = slot.prompt or slot.name.replace("_", " ")
-        
-        # Common appointment slots if not already filled
-        common_slots = {
-            "preferred_day": "day of the week (Monday, Tuesday, etc.) or 'weekday'/'weekend'",
-            "preferred_time": "time of day (morning, afternoon, evening) or specific time",
-            "visit_reason": "reason for the visit or medical issue",
-        }
-        
-        for name, desc in common_slots.items():
-            if name not in self.context.slots:
-                slots_to_extract[name] = desc
-        
-        if not slots_to_extract:
-            return {}
-        
-        return self.llm.extract_slots(
-            user_input,
-            slots_to_extract,
-            context=self._get_context_summary()
-        )
-    
-    def _get_context_summary(self) -> str:
-        parts = []
-        
-        if self.context.slots:
-            slot_str = ", ".join([f"{k}={v}" for k, v in self.context.slots.items()])
-            parts.append(f"Collected: {slot_str}")
-        
-        recent = self.context.history[-4:]
-        if recent:
-            history_str = " | ".join([f"{h['role']}: {h['content'][:40]}" for h in recent])
-            parts.append(f"Recent: {history_str}")
-        
-        return " ".join(parts) if parts else "New conversation"
-    
-    def execute_action_result(self, success: bool, data: Optional[dict] = None) -> EngineResponse:
-        state = self._get_current_state()
-        if not state:
-            return EngineResponse(ended=True, current_state=self.context.current_state)
-        
-        self._pending_action = None
-        
-        if success and state.on_success:
-            self.context.current_state = state.on_success
-        elif not success and state.on_failure:
-            self.context.current_state = state.on_failure
-        elif state.next:
-            self.context.current_state = state.next
-        
-        return self._execute_current_state()
-    
-    def _execute_current_state(self) -> EngineResponse:
-        state = self._get_current_state()
-        
-        if not state:
-            logger.info("flow_ended", flow=self.flow.name, slots=self.context.slots)
-            return EngineResponse(ended=True, current_state=self.context.current_state, slots=self.context.slots)
-        
-        if state.type == StateType.END:
-            message = self._interpolate(state.message) if state.message else None
-            if message:
-                self.context.history.append({"role": "assistant", "content": message})
-            logger.info("flow_ended", flow=self.flow.name, slots=self.context.slots)
-            return EngineResponse(
-                message=message,
-                ended=True,
-                current_state=self.context.current_state,
-                slots=self.context.slots,
-            )
-        
-        if state.type == StateType.ACTION:
-            self._pending_action = state.action
-            logger.info("action_requested", action=state.action)
-            return EngineResponse(
-                action_request=state.action,
-                current_state=self.context.current_state,
-                slots=self.context.slots,
-            )
-        
-        if state.type == StateType.CONDITION:
-            next_state = self._evaluate_condition(state)
-            if next_state:
-                self.context.current_state = next_state
-                return self._execute_current_state()
-        
-        if state.type == StateType.SPEAK:
-            message = self._interpolate(state.message) if state.message else None
-            if message:
-                self.context.history.append({"role": "assistant", "content": message})
-            
-            if state.next:
-                self.context.current_state = state.next
-                next_response = self._execute_current_state()
-                if message and next_response.message:
-                    message = f"{message} {next_response.message}"
-                elif next_response.message:
-                    message = next_response.message
-                return EngineResponse(
-                    message=message,
-                    needs_input=next_response.needs_input,
-                    ended=next_response.ended,
-                    action_request=next_response.action_request,
-                    current_state=next_response.current_state,
-                    slots=self.context.slots,
+        # Handle actions first
+        if step.action:
+            if step.action == ActionType.END:
+                return FlowResult(say=context.interpolate(step.say) if step.say else None, end_flow=True)
+            elif step.action == ActionType.HANGUP:
+                return FlowResult(action=ActionType.HANGUP, end_flow=True)
+            elif step.action == ActionType.TRANSFER:
+                return FlowResult(
+                    say=context.interpolate(step.say) if step.say else None,
+                    action=ActionType.TRANSFER,
+                    action_params=step.action_params,
+                    end_flow=True,
                 )
-            
-            return EngineResponse(
-                message=message,
-                current_state=self.context.current_state,
-                slots=self.context.slots,
-            )
+            elif step.action == ActionType.GOTO:
+                target = step.action_params.get("step")
+                if target:
+                    context.current_step = target
+                    return self._execute_step(session_id)
+            elif step.action == ActionType.SET:
+                for key, value in step.action_params.items():
+                    context.variables[key] = context.interpolate(str(value))
+            elif step.action in self.action_handlers:
+                self.action_handlers[step.action](context, step.action_params)
         
-        # LISTEN or SPEAK_LISTEN
-        message = self._interpolate(state.message) if state.message else None
-        if message:
-            self.context.history.append({"role": "assistant", "content": message})
+        # If step has conditions, evaluate them
+        if step.conditions:
+            next_step = self._evaluate_conditions(step, context)
+            if next_step:
+                context.current_step = next_step
+                return self._execute_step(session_id)
+            elif step.next_step:
+                context.current_step = step.next_step
+                return self._execute_step(session_id)
         
-        return EngineResponse(
-            message=message,
-            needs_input=True,
-            current_state=self.context.current_state,
-            slots=self.context.slots,
-        )
-    
-    def _get_current_state(self) -> Optional[FlowState]:
-        return self.flow.states.get(self.context.current_state)
-    
-    def _interpolate(self, text: str) -> str:
-        if not text:
-            return text
+        # Build result
+        result = FlowResult()
         
-        result = text
+        if step.say:
+            result.say = context.interpolate(step.say)
         
-        for key, value in self.context.variables.items():
-            result = result.replace(f"{{{key}}}", str(value))
+        result.listen = step.listen
         
-        for key, value in self.context.slots.items():
-            result = result.replace(f"{{slots.{key}}}", str(value))
-            result = result.replace(f"{{{key}}}", str(value))
+        # Auto-advance if not listening and has next step
+        if not step.listen and step.next_step:
+            context.current_step = step.next_step
+            next_result = self._execute_step(session_id)
+            if next_result.say:
+                result.say = f"{result.say} {next_result.say}" if result.say else next_result.say
+            result.listen = next_result.listen
+            result.end_flow = next_result.end_flow
+            result.action = next_result.action
+            result.action_params = next_result.action_params
         
         return result
     
-    def _evaluate_condition(self, state: FlowState) -> Optional[str]:
-        condition = state.condition
-        if not condition:
-            return state.if_true or state.next
+    def _evaluate_conditions(self, step: FlowStep, context: FlowContext) -> Optional[str]:
+        all_vars = context.get_all()
         
-        if condition.startswith("slots."):
-            parts = condition.split(".")
-            if len(parts) >= 2:
-                slot_name = parts[1].split()[0]
-                if self.context.slots.get(slot_name):
-                    return state.if_true
-                return state.if_false
+        for condition in step.conditions:
+            if condition.evaluate(all_vars):
+                logger.debug(
+                    "condition_matched",
+                    variable=condition.variable,
+                    operator=condition.operator.value,
+                    next=condition.next_step,
+                )
+                return condition.next_step
         
-        return state.if_true or state.next
+        return None
+    
+    def get_context(self, session_id: str) -> Optional[FlowContext]:
+        return self.contexts.get(session_id)
+    
+    def end_flow(self, session_id: str) -> None:
+        if session_id in self.contexts:
+            del self.contexts[session_id]
+            logger.info("flow_ended", session=session_id[:8])

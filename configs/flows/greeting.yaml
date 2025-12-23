@@ -1,0 +1,63 @@
+name: greeting
+description: Simple greeting flow
+version: "1.0"
+initial_step: start
+
+steps:
+  start:
+    say: "Hello! I'm your voice assistant. How can I help you today?"
+    listen: true
+    next: handle_input
+  
+  handle_input:
+    conditions:
+      - variable: last_input
+        operator: contains
+        value: "appointment"
+        next: appointment_start
+      - variable: last_input
+        operator: contains
+        value: "help"
+        next: help
+      - variable: last_input
+        operator: contains
+        value: "bye"
+        next: goodbye
+    next: fallback
+  
+  appointment_start:
+    say: "I can help you schedule an appointment. What day works for you?"
+    listen: true
+    extract:
+      - name: date
+        type: date
+        prompt: "What day would you like? You can say something like 'tomorrow' or 'next Monday'."
+    next: confirm_date
+  
+  confirm_date:
+    say: "Got it, you want an appointment on {date}. What time works best?"
+    listen: true
+    extract:
+      - name: time
+        type: time
+        prompt: "What time? For example, '10 AM' or 'afternoon'."
+    next: confirm_booking
+  
+  confirm_booking:
+    say: "Perfect! I've noted your appointment for {date} at {time}. Is there anything else?"
+    listen: true
+    next: handle_input
+  
+  help:
+    say: "I can help you with booking appointments, answering questions, or just chatting. What would you like to do?"
+    listen: true
+    next: handle_input
+  
+  fallback:
+    say: "I'm not sure I understood. Could you rephrase that? You can ask me to book an appointment or say 'help' for options."
+    listen: true
+    next: handle_input
+  
+  goodbye:
+    say: "Goodbye! Have a great day!"
+    action: end

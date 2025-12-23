@@ -1,0 +1,150 @@
+name: customer_service
+description: Customer service flow with intent routing
+version: "1.0"
+initial_step: greeting
+
+slots:
+  - name: customer_name
+    type: string
+  - name: issue_type
+    type: choice
+    choices: ["billing", "technical", "general"]
+  - name: account_number
+    type: string
+    patterns: ["\\d{8,10}"]
+
+steps:
+  greeting:
+    say: "Thank you for calling. My name is Alex, your virtual assistant. May I have your name please?"
+    listen: true
+    extract:
+      - name: customer_name
+        type: string
+    next: got_name
+  
+  got_name:
+    say: "Nice to meet you, {customer_name}. How can I help you today? Is this about billing, technical support, or something else?"
+    listen: true
+    extract:
+      - name: issue_type
+        type: choice
+        choices: ["billing", "technical", "general"]
+        prompt: "Is this about billing, technical support, or a general inquiry?"
+    conditions:
+      - variable: issue_type
+        operator: equals
+        value: "billing"
+        next: billing_flow
+      - variable: issue_type
+        operator: equals
+        value: "technical"
+        next: technical_flow
+    next: general_flow
+  
+  billing_flow:
+    say: "I can help with billing. Could you provide your account number?"
+    listen: true
+    extract:
+      - name: account_number
+        type: string
+        patterns: ["\\d{8,10}"]
+        prompt: "I need your account number. It's usually 8 to 10 digits."
+    next: billing_lookup
+  
+  billing_lookup:
+    say: "Thank you. I'm looking up account {account_number}. Your current balance is $45.00 due on the 15th. Would you like to make a payment or discuss charges?"
+    listen: true
+    conditions:
+      - variable: last_input
+        operator: contains
+        value: "payment"
+        next: payment_flow
+      - variable: last_input
+        operator: contains
+        value: "charges"
+        next: charges_flow
+    next: anything_else
+  
+  payment_flow:
+    say: "I can transfer you to our payment system. One moment please."
+    action: transfer
+    action_params:
+      destination: "payment_ivr"
+      announce: "Transferring to payment system"
+  
+  charges_flow:
+    say: "Your recent charges include: Monthly service $35, and data overage $10. Would you like to dispute any charges?"
+    listen: true
+    next: anything_else
+  
+  technical_flow:
+    say: "I'm sorry you're having technical issues. Can you describe the problem?"
+    listen: true
+    next: technical_troubleshoot
+  
+  technical_troubleshoot:
+    say: "I understand. Have you tried restarting your device? That often resolves common issues."
+    listen: true
+    conditions:
+      - variable: last_input
+        operator: contains
+        value: "yes"
+        next: still_issue
+      - variable: last_input
+        operator: contains
+        value: "no"
+        next: suggest_restart
+    next: still_issue
+  
+  suggest_restart:
+    say: "Please try turning your device off and on again. I'll wait."
+    listen: true
+    next: still_issue
+  
+  still_issue:
+    say: "Is the issue resolved now?"
+    listen: true
+    conditions:
+      - variable: last_input
+        operator: contains
+        value: "yes"
+        next: resolved
+      - variable: last_input
+        operator: contains
+        value: "no"
+        next: escalate
+    next: anything_else
+  
+  escalate:
+    say: "I apologize for the inconvenience. Let me connect you with a technical specialist who can help further."
+    action: transfer
+    action_params:
+      destination: "tech_support"
+      announce: "Transferring to technical support"
+  
+  general_flow:
+    say: "I'd be happy to help with your general inquiry. What would you like to know?"
+    listen: true
+    next: anything_else
+  
+  resolved:
+    say: "Wonderful! I'm glad that's working now."
+    next: anything_else
+  
+  anything_else:
+    say: "Is there anything else I can help you with today?"
+    listen: true
+    conditions:
+      - variable: last_input
+        operator: contains
+        value: "no"
+        next: goodbye
+      - variable: last_input
+        operator: contains
+        value: "bye"
+        next: goodbye
+    next: got_name
+  
+  goodbye:
+    say: "Thank you for calling, {customer_name}. Have a wonderful day!"
+    action: end

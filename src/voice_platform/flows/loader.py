@@ -1,84 +1,137 @@
-"""Load flows from YAML files."""
+"""Flow YAML loader."""
 from pathlib import Path
-from typing import Union
+from typing import Optional
 
 import yaml
 
-from .models import Flow, FlowState, StateType, Intent, Slot
+from .models import (
+    Flow, 
+    FlowStep, 
+    FlowCondition, 
+    SlotDefinition,
+    ActionType,
+    ConditionOperator,
+)
+from ..logging import get_logger
+
+logger = get_logger("flows.loader")
 
 
-def load_flow(path: Union[str, Path]) -> Flow:
-    """
-    Load a flow from a YAML file.
+def parse_slot(slot_data: dict | str) -> SlotDefinition:
+    """Parse slot definition from YAML."""
+    if isinstance(slot_data, str):
+        return SlotDefinition(name=slot_data)
     
-    Args:
-        path: Path to the YAML flow file
-        
-    Returns:
-        Parsed Flow object
-    """
+    return SlotDefinition(
+        name=slot_data["name"],
+        type=slot_data.get("type", "string"),
+        prompt=slot_data.get("prompt"),
+        required=slot_data.get("required", True),
+        choices=slot_data.get("choices", []),
+        patterns=slot_data.get("patterns", []),
+        default=slot_data.get("default"),
+    )
+
+
+def parse_condition(cond_data: dict) -> FlowCondition:
+    """Parse condition from YAML."""
+    operator = ConditionOperator(cond_data.get("operator", "equals"))
+    
+    return FlowCondition(
+        variable=cond_data["variable"],
+        operator=operator,
+        value=cond_data.get("value"),
+        next_step=cond_data["next"],
+    )
+
+
+def parse_step(step_id: str, step_data: dict) -> FlowStep:
+    """Parse step from YAML."""
+    # Parse slots
+    extract = []
+    if "extract" in step_data:
+        extract_data = step_data["extract"]
+        if isinstance(extract_data, list):
+            extract = [parse_slot(s) for s in extract_data]
+        elif isinstance(extract_data, str):
+            extract = [SlotDefinition(name=extract_data)]
+        elif isinstance(extract_data, dict):
+            extract = [parse_slot(extract_data)]
+    
+    # Parse conditions
+    conditions = []
+    if "conditions" in step_data:
+        conditions = [parse_condition(c) for c in step_data["conditions"]]
+    
+    # Parse action
+    action = None
+    if "action" in step_data:
+        action = ActionType(step_data["action"])
+    
+    return FlowStep(
+        id=step_id,
+        say=step_data.get("say"),
+        listen=step_data.get("listen", False),
+        extract=extract,
+        conditions=conditions,
+        next_step=step_data.get("next"),
+        action=action,
+        action_params=step_data.get("action_params", {}),
+        retries=step_data.get("retries", 2),
+        timeout_seconds=step_data.get("timeout", 10),
+        on_timeout=step_data.get("on_timeout"),
+        on_error=step_data.get("on_error"),
+    )
+
+
+def load_flow(path: str | Path) -> Flow:
+    """Load flow from YAML file."""
     path = Path(path)
     
     with open(path) as f:
         data = yaml.safe_load(f)
     
-    return parse_flow(data)
-
-
-def parse_flow(data: dict) -> Flow:
-    """Parse a flow from a dictionary."""
-    # Parse states
-    states = {}
-    for state_name, state_data in data.get("states", {}).items():
-        states[state_name] = _parse_state(state_name, state_data)
+    # Parse steps
+    steps = {}
+    for step_id, step_data in data.get("steps", {}).items():
+        steps[step_id] = parse_step(step_id, step_data)
     
-    return Flow(
-        name=data.get("name", "unnamed"),
+    # Parse global slots
+    global_slots = []
+    if "slots" in data:
+        global_slots = [parse_slot(s) for s in data["slots"]]
+    
+    flow = Flow(
+        name=data.get("name", path.stem),
+        description=data.get("description", ""),
         version=data.get("version", "1.0"),
-        description=data.get("description"),
-        initial_state=data.get("initial_state", "start"),
-        states=states,
-        global_fallback=data.get("global_fallback", "I'm sorry, something went wrong."),
-        context_defaults=data.get("context_defaults", {}),
+        initial_step=data.get("initial_step", "start"),
+        steps=steps,
+        global_slots=global_slots,
+        fallback_step=data.get("fallback_step"),
+        metadata=data.get("metadata", {}),
     )
+    
+    # Validate
+    errors = flow.validate()
+    if errors:
+        logger.warning("flow_validation_errors", flow=flow.name, errors=errors)
+    
+    logger.info("flow_loaded", name=flow.name, steps=len(steps))
+    return flow
 
 
-def _parse_state(name: str, data: dict) -> FlowState:
-    """Parse a single state."""
-    # Parse intents
-    intents = {}
-    for intent_name, intent_data in data.get("intents", {}).items():
-        intents[intent_name] = Intent(
-            patterns=intent_data.get("patterns", []),
-            examples=intent_data.get("examples", []),
-            next=intent_data.get("next", ""),
-        )
+def load_flows_from_directory(directory: str | Path) -> dict[str, Flow]:
+    """Load all flows from a directory."""
+    directory = Path(directory)
+    flows = {}
     
-    # Parse slots
-    slots = []
-    for slot_data in data.get("slots", []):
-        slots.append(Slot(
-            name=slot_data.get("name", ""),
-            type=slot_data.get("type", "string"),
-            prompt=slot_data.get("prompt"),
-            required=slot_data.get("required", True),
-            validation=slot_data.get("validation"),
-        ))
+    for path in directory.glob("*.yaml"):
+        try:
+            flow = load_flow(path)
+            flows[flow.name] = flow
+        except Exception as e:
+            logger.error("flow_load_error", path=str(path), error=str(e))
     
-    return FlowState(
-        name=name,
-        type=StateType(data.get("type", "speak")),
-        message=data.get("message"),
-        intents=intents,
-        slots=slots,
-        fallback_message=data.get("fallback_message", "I didn't catch that. Could you repeat?"),
-        max_retries=data.get("max_retries", 2),
-        action=data.get("action"),
-        action_params=data.get("action_params", {}),
-        on_success=data.get("on_success"),
-        on_failure=data.get("on_failure"),
-        condition=data.get("condition"),
-        if_true=data.get("if_true"),
-        if_false=data.get("if_false"),
-        next=data.get("next"),
-    )
+    logger.info("flows_loaded", count=len(flows))
+    return flows
