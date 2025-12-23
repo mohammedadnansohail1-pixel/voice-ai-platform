@@ -1,11 +1,14 @@
 """FastAPI server for voice platform with streaming."""
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from ..core.config import Config, load_config
 from ..core.types import SessionState
@@ -93,6 +96,19 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # Static files
+    static_path = Path(__file__).parent.parent.parent.parent / "static"
+    if static_path.exists():
+        app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+    
+    @app.get("/")
+    async def index():
+        """Serve the web client."""
+        index_path = static_path / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        return {"message": "Voice AI Platform API", "docs": "/docs"}
     
     @app.get("/health")
     async def health():
