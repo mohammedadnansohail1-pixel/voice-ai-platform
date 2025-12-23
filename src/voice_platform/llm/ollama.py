@@ -1,6 +1,8 @@
-"""Ollama LLM implementation."""
+"""Ollama LLM implementation with streaming."""
+import asyncio
+import json
 import time
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Callable, Optional
 
 import httpx
 
@@ -17,9 +19,9 @@ logger = get_logger("llm.ollama")
 @llm_registry.register("ollama")
 class OllamaLLM(BaseLLM):
     """
-    Ollama LLM backend for local inference.
+    Ollama LLM backend with streaming support.
     
-    Supports streaming responses for low-latency TTS handoff.
+    Streams tokens and buffers by sentence for TTS handoff.
     """
     
     def __init__(self, config: Optional[LLMConfig] = None) -> None:
@@ -99,7 +101,7 @@ class OllamaLLM(BaseLLM):
         messages: list[LLMMessage],
         max_tokens: Optional[int] = None,
     ) -> AsyncIterator[str]:
-        """Generate response with streaming."""
+        """Generate response with token streaming."""
         client = self._ensure_async_client()
         
         payload = {
@@ -124,7 +126,6 @@ class OllamaLLM(BaseLLM):
                     if not line:
                         continue
                     
-                    import json
                     try:
                         data = json.loads(line)
                         content = data.get("message", {}).get("content", "")
@@ -143,6 +144,65 @@ class OllamaLLM(BaseLLM):
                 operation="generate_stream",
                 reason=str(e),
             )
+    
+    async def generate_stream_sentences(
+        self,
+        messages: list[LLMMessage],
+        on_sentence: Callable[[str], None],
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """
+        Stream tokens and call on_sentence for each complete sentence.
+        
+        This enables TTS to start speaking while LLM is still generating.
+        
+        Args:
+            messages: Conversation history
+            on_sentence: Callback for each sentence
+            max_tokens: Max tokens to generate
+        
+        Returns:
+            Full response text
+        """
+        buffer = ""
+        full_response = ""
+        sentence_count = 0
+        
+        # Sentence endings
+        endings = (".", "!", "?", "。", "！", "？")
+        # Minimum chars before checking for sentence end
+        min_sentence_len = 20
+        
+        async for token in self.generate_stream(messages, max_tokens):
+            buffer += token
+            full_response += token
+            
+            # Check for sentence boundary
+            if len(buffer) >= min_sentence_len:
+                for i, char in enumerate(buffer):
+                    if char in endings:
+                        # Check it's not a decimal or abbreviation
+                        if i + 1 < len(buffer) and buffer[i + 1] not in " \n":
+                            continue
+                        
+                        sentence = buffer[:i + 1].strip()
+                        if sentence:
+                            sentence_count += 1
+                            logger.debug(
+                                "sentence_ready",
+                                num=sentence_count,
+                                length=len(sentence),
+                            )
+                            on_sentence(sentence)
+                        
+                        buffer = buffer[i + 1:].lstrip()
+                        break
+        
+        # Send any remaining text
+        if buffer.strip():
+            on_sentence(buffer.strip())
+        
+        return full_response
     
     def __del__(self) -> None:
         """Cleanup clients."""

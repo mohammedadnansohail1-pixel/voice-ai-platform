@@ -1,4 +1,4 @@
-"""FastAPI server for voice platform."""
+"""FastAPI server for voice platform with streaming."""
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -16,6 +16,7 @@ from ..llm import OllamaLLM
 from ..tts import KokoroTTS
 from ..channels.websocket import WebSocketChannel
 from ..audio.accumulator import SpeechAccumulator
+from ..engine.streaming import StreamingPipeline
 
 logger = get_logger("api.server")
 
@@ -52,6 +53,10 @@ class VoicePlatformApp:
         
         self.is_loaded = True
         logger.info("models_loaded")
+    
+    def create_streaming_pipeline(self) -> StreamingPipeline:
+        """Create a streaming pipeline instance."""
+        return StreamingPipeline(self.llm, self.tts, self.config)
 
 
 def create_app(config_path: Optional[str] = None) -> FastAPI:
@@ -115,7 +120,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     
     @app.websocket("/ws/voice")
     async def voice_websocket(websocket: WebSocket):
-        """WebSocket endpoint for voice conversations."""
+        """WebSocket endpoint for streaming voice conversations."""
         if not app_state.is_loaded:
             await websocket.close(code=1013, reason="Models not loaded")
             return
@@ -125,6 +130,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         
         # Initialize session components
         accumulator = SpeechAccumulator(config.vad)
+        pipeline = app_state.create_streaming_pipeline()
         
         # Audit
         app_state.audit.session_start(
@@ -136,6 +142,17 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         
         try:
             async for audio_chunk in channel.receive_audio():
+                # Check for barge-in during speech
+                if channel.session.is_speaking:
+                    vad_result = app_state.vad.process_chunk(audio_chunk)
+                    if vad_result.is_speech and config.barge_in.enabled:
+                        # User interrupted - stop TTS
+                        pipeline.interrupt()
+                        channel.session.is_speaking = False
+                        await channel.send_status("interrupted")
+                        accumulator.reset()
+                        continue
+                
                 # VAD
                 vad_result = app_state.vad.process_chunk(audio_chunk)
                 
@@ -156,18 +173,25 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                         # Add to history
                         channel.session.add_message("user", transcript.text)
                         
-                        # LLM
-                        response = app_state.llm.generate(channel.session.messages)
-                        channel.session.add_message("assistant", response.content)
-                        
-                        await channel.send_response(response.content)
-                        
-                        # TTS
+                        # Streaming LLM -> TTS
                         await channel.send_status("speaking")
                         channel.session.state = SessionState.SPEAKING
+                        channel.session.is_speaking = True
                         
-                        tts_result = app_state.tts.synthesize(response.content)
-                        await channel.send_audio(tts_result.audio_data, tts_result.sample_rate)
+                        async def on_audio(audio: np.ndarray, sample_rate: int):
+                            """Send each sentence's audio as it's ready."""
+                            if not pipeline.is_interrupted:
+                                await channel.send_audio(audio, sample_rate)
+                        
+                        full_response, _ = await pipeline.generate_streaming(
+                            channel.session.messages,
+                            on_audio=on_audio,
+                        )
+                        
+                        channel.session.add_message("assistant", full_response)
+                        await channel.send_response(full_response)
+                        
+                        channel.session.is_speaking = False
                     
                     await channel.send_status("listening")
                     channel.session.state = SessionState.LISTENING
