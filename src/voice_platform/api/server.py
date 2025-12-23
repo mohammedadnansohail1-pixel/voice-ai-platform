@@ -1,4 +1,4 @@
-"""FastAPI server for voice platform with streaming."""
+"""FastAPI server for voice platform with streaming and telephony."""
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,8 +18,11 @@ from ..asr import WhisperASR
 from ..llm import OllamaLLM
 from ..tts import KokoroTTS
 from ..channels.websocket import WebSocketChannel
+from ..channels.twilio import TwilioChannel
 from ..audio.accumulator import SpeechAccumulator
 from ..engine.streaming import StreamingPipeline
+from ..flows import load_flows_from_directory, FlowEngine
+from .routes.telephony import router as telephony_router
 
 logger = get_logger("api.server")
 
@@ -34,6 +37,7 @@ class VoicePlatformApp:
         self.llm: Optional[OllamaLLM] = None
         self.tts: Optional[KokoroTTS] = None
         self.audit: Optional[AuditLogger] = None
+        self.flow_engine: Optional[FlowEngine] = None
         self.is_loaded = False
     
     def load_models(self) -> None:
@@ -54,6 +58,12 @@ class VoicePlatformApp:
             audit_path=self.config.logging.audit_path,
         )
         
+        # Load conversation flows
+        flows_dir = Path("configs/flows")
+        if flows_dir.exists():
+            flows = load_flows_from_directory(flows_dir)
+            self.flow_engine = FlowEngine(flows, llm=self.llm)
+        
         self.is_loaded = True
         logger.info("models_loaded")
     
@@ -68,12 +78,10 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     config = load_config(config_path) if config_path else Config()
     setup_logging(config.logging)
     
-    # Create app state immediately
     app_state = VoicePlatformApp(config)
     
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        """Load models on startup."""
         app_state.load_models()
         logger.info("server_started", tenant=config.tenant.id)
         yield
@@ -85,7 +93,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         lifespan=lifespan,
     )
     
-    # Store state on app
     app.state.platform = app_state
     
     # CORS
@@ -97,6 +104,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         allow_headers=["*"],
     )
     
+    # Include telephony routes
+    app.include_router(telephony_router)
+    
     # Static files
     static_path = Path(__file__).parent.parent.parent.parent / "static"
     if static_path.exists():
@@ -104,7 +114,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     
     @app.get("/")
     async def index():
-        """Serve the web client."""
         index_path = static_path / "index.html"
         if index_path.exists():
             return FileResponse(index_path)
@@ -112,7 +121,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     
     @app.get("/health")
     async def health():
-        """Health check endpoint."""
         return {
             "status": "healthy" if app_state.is_loaded else "starting",
             "tenant": config.tenant.id,
@@ -121,7 +129,6 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     
     @app.get("/health/ready")
     async def ready():
-        """Readiness check - returns 503 if models not loaded."""
         if not app_state.is_loaded:
             raise HTTPException(status_code=503, detail="Models not loaded")
         return {
@@ -131,12 +138,12 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 "asr": app_state.asr is not None,
                 "llm": app_state.llm is not None,
                 "tts": app_state.tts is not None,
-            }
+            },
+            "flows": list(app_state.flow_engine.flows.keys()) if app_state.flow_engine else [],
         }
     
     @app.websocket("/ws/voice")
     async def voice_websocket(websocket: WebSocket):
-        """WebSocket endpoint for streaming voice conversations."""
         if not app_state.is_loaded:
             await websocket.close(code=1013, reason="Models not loaded")
             return
@@ -144,69 +151,50 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         channel = WebSocketChannel(websocket, config)
         await channel.accept()
         
-        # Initialize session components
         accumulator = SpeechAccumulator(config.vad)
         pipeline = app_state.create_streaming_pipeline()
         
-        # Audit
-        app_state.audit.session_start(
-            channel.session.session_id,
-            channel="websocket",
-        )
-        
+        app_state.audit.session_start(channel.session.session_id, channel="websocket")
         await channel.send_status("ready")
         
         try:
             async for audio_chunk in channel.receive_audio():
-                # Check for barge-in during speech
                 if channel.session.is_speaking:
                     vad_result = app_state.vad.process_chunk(audio_chunk)
                     if vad_result.is_speech and config.barge_in.enabled:
-                        # User interrupted - stop TTS
                         pipeline.interrupt()
                         channel.session.is_speaking = False
                         await channel.send_status("interrupted")
                         accumulator.reset()
                         continue
                 
-                # VAD
                 vad_result = app_state.vad.process_chunk(audio_chunk)
-                
-                # Accumulate speech
                 segment = accumulator.process(audio_chunk, vad_result)
                 
                 if segment:
-                    # Speech complete - process
                     await channel.send_status("processing")
                     channel.session.state = SessionState.PROCESSING
                     
-                    # ASR
                     transcript = app_state.asr.transcribe(segment.audio)
                     
                     if transcript.text.strip():
                         await channel.send_transcript(transcript.text)
-                        
-                        # Add to history
                         channel.session.add_message("user", transcript.text)
                         
-                        # Streaming LLM -> TTS
                         await channel.send_status("speaking")
                         channel.session.state = SessionState.SPEAKING
                         channel.session.is_speaking = True
                         
                         async def on_audio(audio: np.ndarray, sample_rate: int):
-                            """Send each sentence's audio as it's ready."""
                             if not pipeline.is_interrupted:
                                 await channel.send_audio(audio, sample_rate)
                         
                         full_response, _ = await pipeline.generate_streaming(
-                            channel.session.messages,
-                            on_audio=on_audio,
+                            channel.session.messages, on_audio=on_audio
                         )
                         
                         channel.session.add_message("assistant", full_response)
                         await channel.send_response(full_response)
-                        
                         channel.session.is_speaking = False
                     
                     await channel.send_status("listening")
@@ -214,12 +202,95 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         
         except WebSocketDisconnect:
             logger.info("client_disconnected", session_id=channel.session.session_id[:8])
-        
         finally:
-            app_state.audit.session_end(
-                channel.session.session_id,
-                duration_s=channel.session.duration_s,
-            )
+            app_state.audit.session_end(channel.session.session_id, duration_s=channel.session.duration_s)
+            await channel.close()
+    
+    @app.websocket("/telephony/media-stream")
+    async def twilio_media_stream(websocket: WebSocket):
+        if not app_state.is_loaded:
+            await websocket.close(code=1013, reason="Models not loaded")
+            return
+        
+        channel = TwilioChannel(websocket, config)
+        await channel.accept()
+        
+        accumulator = SpeechAccumulator(config.vad)
+        pipeline = app_state.create_streaming_pipeline()
+        
+        flow_result = None
+        if app_state.flow_engine and "greeting" in app_state.flow_engine.flows:
+            flow_result = app_state.flow_engine.start_flow(channel.session.session_id, "greeting")
+        
+        app_state.audit.session_start(channel.session.session_id, channel="twilio")
+        
+        try:
+            if flow_result and flow_result.say:
+                tts_result = app_state.tts.synthesize(flow_result.say)
+                await channel.send_audio(tts_result.audio_data, tts_result.sample_rate)
+            
+            async for audio_chunk in channel.receive_audio():
+                if channel.session.is_speaking:
+                    vad_result = app_state.vad.process_chunk(audio_chunk)
+                    if vad_result.is_speech and config.barge_in.enabled:
+                        pipeline.interrupt()
+                        await channel.clear_audio()
+                        channel.session.is_speaking = False
+                        accumulator.reset()
+                        continue
+                
+                vad_result = app_state.vad.process_chunk(audio_chunk)
+                segment = accumulator.process(audio_chunk, vad_result)
+                
+                if segment:
+                    channel.session.state = SessionState.PROCESSING
+                    transcript = app_state.asr.transcribe(segment.audio)
+                    
+                    if transcript.text.strip():
+                        user_text = transcript.text.strip()
+                        channel.session.add_message("user", user_text)
+                        
+                        response_text = None
+                        if app_state.flow_engine:
+                            ctx = app_state.flow_engine.get_context(channel.session.session_id)
+                            if ctx:
+                                flow_result = app_state.flow_engine.process_input(
+                                    channel.session.session_id, user_text
+                                )
+                                response_text = flow_result.say
+                                
+                                if flow_result.end_flow:
+                                    if response_text:
+                                        tts_result = app_state.tts.synthesize(response_text)
+                                        await channel.send_audio(tts_result.audio_data, tts_result.sample_rate)
+                                    break
+                        
+                        if not response_text:
+                            channel.session.state = SessionState.SPEAKING
+                            channel.session.is_speaking = True
+                            
+                            async def on_audio(audio: np.ndarray, sample_rate: int):
+                                if not pipeline.is_interrupted:
+                                    await channel.send_audio(audio, sample_rate)
+                            
+                            response_text, _ = await pipeline.generate_streaming(
+                                channel.session.messages, on_audio=on_audio
+                            )
+                            channel.session.is_speaking = False
+                        else:
+                            tts_result = app_state.tts.synthesize(response_text)
+                            await channel.send_audio(tts_result.audio_data, tts_result.sample_rate)
+                        
+                        channel.session.add_message("assistant", response_text)
+                    
+                    channel.session.state = SessionState.LISTENING
+        
+        except WebSocketDisconnect:
+            logger.info("twilio_disconnected", session_id=channel.session.session_id[:8])
+        finally:
+            if app_state.flow_engine:
+                app_state.flow_engine.end_flow(channel.session.session_id)
+            app_state.audit.session_end(channel.session.session_id, duration_s=channel.session.duration_s)
             await channel.close()
     
     return app
