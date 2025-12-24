@@ -245,6 +245,26 @@ class HealthcareVoiceAssistant:
             self._audio_out.stop()
             logger.debug("speech_interrupted")
     
+    def _flush_audio_buffer(self) -> None:
+        """Flush audio input buffer to prevent echo feedback."""
+        if self._audio_in:
+            # Drain any buffered audio from the mic
+            while True:
+                chunk = self._audio_in.get_chunk(timeout=0.01)
+                if chunk is None:
+                    break
+        
+        # Reset the speech accumulator
+        if self._accumulator:
+            self._accumulator.reset()
+        
+        # Reset VAD state
+        if self._vad:
+            self._vad.reset()
+        
+        # Small delay to let audio settle
+        time.sleep(0.1)
+    
     def run(self) -> None:
         """Run the healthcare voice assistant main loop."""
         logger.info("starting_healthcare_assistant")
@@ -270,7 +290,11 @@ class HealthcareVoiceAssistant:
         print(f"🏥 {clinic_name} - Healthcare Voice Assistant")
         print("=" * 60)
         print(f"\n🤖 {greeting.message}\n")
+        
         self.speak(greeting.message)
+        
+        # IMPORTANT: Flush audio buffer after speaking to prevent echo
+        self._flush_audio_buffer()
         
         try:
             while self.is_running:
@@ -279,16 +303,12 @@ class HealthcareVoiceAssistant:
                 if chunk is None:
                     continue
                 
+                # Skip if we're speaking (prevent echo)
+                if self.session and self.session.is_speaking:
+                    continue
+                
                 # Run VAD
                 vad_result = self._vad.process_chunk(chunk)
-                
-                # Check for barge-in during playback
-                if self.session and self.session.is_speaking:
-                    if vad_result.is_speech and self.config.barge_in.enabled:
-                        if vad_result.confidence > self.config.barge_in.energy_threshold:
-                            self.interrupt()
-                            self._accumulator.reset()
-                            continue
                 
                 # Accumulate speech
                 segment = self._accumulator.process(chunk, vad_result)
@@ -310,6 +330,9 @@ class HealthcareVoiceAssistant:
                         
                         # TTS
                         self.speak(response)
+                        
+                        # IMPORTANT: Flush audio buffer after speaking
+                        self._flush_audio_buffer()
                         
                         # Check if conversation ended
                         if ended:
