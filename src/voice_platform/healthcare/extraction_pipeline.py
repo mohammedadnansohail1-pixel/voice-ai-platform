@@ -18,6 +18,22 @@ from extract_core import (
     EntityType,
 )
 
+import re
+
+# Fallback patterns for visit reason extraction
+VISIT_REASON_PATTERNS = [
+    # "I have/I'm having a terrible toothache"
+    (r"(?:i have|i'm having|i am having|having|got)\s+(?:a\s+)?(?:terrible\s+|bad\s+|severe\s+)?(.+?)(?:\.|$)", 1),
+    # "my tooth hurts/aches"
+    (r"(?:my|the)\s+(.+?)\s+(?:hurts?|aches?|is\s+(?:bothering|hurting|painful))", 1),
+    # "toothache", "headache", "backache" standalone
+    (r"\b(\w+ache)\b", 1),
+    # "pain in my X"
+    (r"pain\s+in\s+(?:my\s+)?(.+?)(?:\.|$)", 1),
+    # "checkup/physical/annual"
+    (r"\b(check[- ]?up|physical|annual\s+exam|routine\s+exam)\b", 1),
+]
+
 from ..logging import get_logger
 
 logger = get_logger("healthcare.extraction")
@@ -281,10 +297,23 @@ class HealthcareExtractionPipeline:
                 info["provider_name"] = entity.value
         
         # Extract visit reason from medical entities (symptoms/conditions)
+        source_text = base_result.source_text if hasattr(base_result, "source_text") else ""
         if not info["visit_reason"]:
             for entity in medical_result.entities:
                 if entity.entity_type.value.lower() in ["symptom", "condition"]:
                     info["visit_reason"] = entity.value
                     break
         
+        # Fallback: use regex patterns on raw text
+        if not info["visit_reason"] and hasattr(base_result, "source_text"):
+            text_lower = base_result.source_text.lower().strip()
+            for pattern, group in VISIT_REASON_PATTERNS:
+                match = re.search(pattern, text_lower, re.IGNORECASE)
+                if match:
+                    reason = match.group(group).strip()
+                    reason = re.sub(r"[.,!?]+$", "", reason)
+                    if len(reason) > 2:
+                        info["visit_reason"] = reason
+                        break
+
         return info

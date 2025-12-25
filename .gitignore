@@ -42,3 +42,4 @@ Thumbs.db
 .coverage
 htmlcov/
 src_backup_20251222/
+data/*.db

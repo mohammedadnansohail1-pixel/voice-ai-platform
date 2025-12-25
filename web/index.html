@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sunrise Medical - Voice Assistant</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 24px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }
+        .logo { font-size: 48px; margin-bottom: 10px; }
+        h1 { color: #333; margin-bottom: 8px; font-size: 28px; }
+        .subtitle { color: #666; margin-bottom: 30px; font-size: 16px; }
+        
+        .call-button {
+            width: 120px; height: 120px;
+            border-radius: 50%; border: none;
+            background: linear-gradient(135deg, #00c853 0%, #00e676 100%);
+            color: white; font-size: 48px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 8px 30px rgba(0, 200, 83, 0.4);
+            margin: 20px 0;
+        }
+        .call-button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 12px 40px rgba(0, 200, 83, 0.5);
+        }
+        .call-button.active {
+            background: linear-gradient(135deg, #ff1744 0%, #ff5252 100%);
+            box-shadow: 0 8px 30px rgba(255, 23, 68, 0.4);
+        }
+        .call-button.recording {
+            animation: pulse 1s infinite;
+        }
+        .call-button:disabled {
+            background: #ccc; cursor: not-allowed; box-shadow: none;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.08); }
+        }
+        
+        .status {
+            margin: 20px 0; padding: 12px 24px;
+            border-radius: 20px; font-size: 14px; font-weight: 500;
+        }
+        .status.idle { background: #f5f5f5; color: #666; }
+        .status.connecting { background: #fff3e0; color: #e65100; }
+        .status.connected { background: #e8f5e9; color: #2e7d32; }
+        .status.recording { background: #e3f2fd; color: #1565c0; }
+        .status.processing { background: #fce4ec; color: #c2185b; }
+        .status.error { background: #ffebee; color: #c62828; }
+        
+        .transcript {
+            margin-top: 20px; text-align: left;
+            max-height: 300px; overflow-y: auto;
+            border: 1px solid #eee; border-radius: 12px; padding: 16px;
+        }
+        .transcript-entry {
+            margin-bottom: 12px; padding: 10px 14px;
+            border-radius: 12px; font-size: 14px; line-height: 1.5;
+        }
+        .transcript-entry.user { background: #e3f2fd; margin-left: 20px; }
+        .transcript-entry.agent { background: #f5f5f5; margin-right: 20px; }
+        .transcript-entry .label {
+            font-size: 11px; font-weight: 600;
+            text-transform: uppercase; margin-bottom: 4px; opacity: 0.7;
+        }
+        
+        .instructions {
+            margin-top: 20px; padding: 16px;
+            background: #f5f5f5; border-radius: 12px;
+            font-size: 13px; color: #666; text-align: left;
+        }
+        .instructions h3 { font-size: 14px; margin-bottom: 8px; color: #333; }
+        .instructions ul { margin-left: 20px; }
+        .instructions li { margin-bottom: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🏥</div>
+        <h1>Sunrise Medical</h1>
+        <p class="subtitle">Voice Assistant Demo</p>
+        
+        <button id="callBtn" class="call-button" onclick="toggleCall()">📞</button>
+        <p style="font-size: 12px; color: #999; margin-bottom: 10px;">
+            Hold to talk, release to send
+        </p>
+        
+        <div id="status" class="status idle">Click to connect</div>
+        
+        <div id="transcript" class="transcript" style="display: none;"></div>
+        
+        <div class="instructions">
+            <h3>How to use:</h3>
+            <ul>
+                <li>Click the phone button to connect</li>
+                <li>Hold the button while speaking</li>
+                <li>Release to send your message</li>
+                <li>Try: "I have a toothache" → "Tuesday" → "2 PM" → "Yes"</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let audioContext = null;
+        let isConnected = false;
+        let isRecording = false;
+        
+        const callBtn = document.getElementById('callBtn');
+        const statusEl = document.getElementById('status');
+        const transcriptEl = document.getElementById('transcript');
+        
+        function setStatus(text, className) {
+            statusEl.textContent = text;
+            statusEl.className = 'status ' + className;
+        }
+        
+        function addTranscript(text, role) {
+            transcriptEl.style.display = 'block';
+            const entry = document.createElement('div');
+            entry.className = 'transcript-entry ' + role;
+            entry.innerHTML = `
+                <div class="label">${role === 'user' ? '🎤 You' : '🤖 Assistant'}</div>
+                <div>${text}</div>
+            `;
+            transcriptEl.appendChild(entry);
+            transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+        
+        async function toggleCall() {
+            if (!isConnected) {
+                await connect();
+            }
+        }
+        
+        async function connect() {
+            try {
+                setStatus('Connecting...', 'connecting');
+                callBtn.disabled = true;
+                
+                // Get microphone permission
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        sampleRate: 16000
+                    }
+                });
+                
+                // Setup MediaRecorder
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) {
+                        audioChunks.push(e.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = async () => {
+                    if (audioChunks.length > 0) {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        audioChunks = [];
+                        await sendAudio(audioBlob);
+                    }
+                };
+                
+                // Connect WebSocket
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+                
+                ws.onopen = () => {
+                    isConnected = true;
+                    setStatus('Connected - Hold button to speak', 'connected');
+                    callBtn.disabled = false;
+                    callBtn.classList.add('active');
+                    callBtn.textContent = '🎤';
+                    
+                    // Setup push-to-talk
+                    callBtn.onmousedown = startRecording;
+                    callBtn.onmouseup = stopRecording;
+                    callBtn.onmouseleave = stopRecording;
+                    callBtn.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
+                    callBtn.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+                };
+                
+                ws.onmessage = async (event) => {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'transcript') {
+                        addTranscript(data.text, data.role);
+                    } else if (data.type === 'audio') {
+                        await playAudio(data.data, data.sample_rate);
+                    } else if (data.type === 'ended') {
+                        setStatus('Call ended', 'idle');
+                        if (data.booking) {
+                            addTranscript(`✅ Booked! Confirmation: ${data.booking.confirmation_number}`, 'agent');
+                        }
+                    }
+                };
+                
+                ws.onclose = () => {
+                    isConnected = false;
+                    setStatus('Disconnected', 'idle');
+                    callBtn.classList.remove('active');
+                    callBtn.textContent = '📞';
+                    callBtn.onmousedown = null;
+                    callBtn.onmouseup = null;
+                };
+                
+                ws.onerror = (e) => {
+                    console.error('WebSocket error:', e);
+                    setStatus('Connection error', 'error');
+                };
+                
+            } catch (error) {
+                console.error('Connect error:', error);
+                setStatus('Error: ' + error.message, 'error');
+                callBtn.disabled = false;
+            }
+        }
+        
+        function startRecording() {
+            if (!isConnected || isRecording) return;
+            isRecording = true;
+            audioChunks = [];
+            mediaRecorder.start(100);
+            callBtn.classList.add('recording');
+            setStatus('🔴 Recording...', 'recording');
+        }
+        
+        function stopRecording() {
+            if (!isRecording) return;
+            isRecording = false;
+            mediaRecorder.stop();
+            callBtn.classList.remove('recording');
+            setStatus('Processing...', 'processing');
+        }
+        
+        async function sendAudio(blob) {
+            // Convert webm to raw PCM
+            const arrayBuffer = await blob.arrayBuffer();
+            
+            // Decode using AudioContext
+            if (!audioContext) {
+                audioContext = new AudioContext({ sampleRate: 16000 });
+            }
+            
+            try {
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                const pcmData = audioBuffer.getChannelData(0);
+                
+                // Convert to int16
+                const int16Data = new Int16Array(pcmData.length);
+                for (let i = 0; i < pcmData.length; i++) {
+                    int16Data[i] = Math.max(-32768, Math.min(32767, pcmData[i] * 32768));
+                }
+                
+                // Send as base64
+                const base64 = btoa(String.fromCharCode(...new Uint8Array(int16Data.buffer)));
+                
+                ws.send(JSON.stringify({
+                    type: 'audio',
+                    data: base64,
+                    sample_rate: 16000
+                }));
+                
+                ws.send(JSON.stringify({ type: 'end_speech' }));
+                
+            } catch (e) {
+                console.error('Audio decode error:', e);
+                setStatus('Audio error - try again', 'error');
+            }
+            
+            setStatus('Connected - Hold button to speak', 'connected');
+        }
+        
+        async function playAudio(base64Data, sampleRate) {
+            if (!audioContext) {
+                audioContext = new AudioContext({ sampleRate: sampleRate });
+            }
+            
+            // Decode base64 to int16
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            const int16Data = new Int16Array(bytes.buffer);
+            
+            // Convert to float32
+            const floatData = new Float32Array(int16Data.length);
+            for (let i = 0; i < int16Data.length; i++) {
+                floatData[i] = int16Data[i] / 32768;
+            }
+            
+            // Create audio buffer and play
+            const audioBuffer = audioContext.createBuffer(1, floatData.length, sampleRate);
+            audioBuffer.getChannelData(0).set(floatData);
+            
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+        }
+    </script>
+</body>
+</html>
