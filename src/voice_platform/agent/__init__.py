@@ -116,3 +116,6 @@ __all__ = [
     "ToolResponse",
     "AppointmentDatabase",
 ]
+
+# Legacy agent (used by run_webrtc_demo.py)
+from .tool_calling_agent import ToolCallingAgent

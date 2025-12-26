@@ -12,9 +12,9 @@ from enum import Enum
 import re
 import uuid
 
-from .slot_extractor import SlotExtractor, ExtractedSlots, ConfirmationType
-from .llm_slot_extractor import LLMSlotExtractor
-from .tools import AppointmentTools, ToolResponse
+from .extractors.slot_extractor import SlotExtractor, ExtractedSlots, ConfirmationType
+from .extractors.llm_slot_extractor import LLMSlotExtractor
+from .tools.appointment import AppointmentTools, ToolResponse
 from ..llm.ollama import OllamaLLM
 from ..core.types import LLMMessage
 from ..core.config import LLMConfig
@@ -194,6 +194,61 @@ class ToolCallingAgent:
 
     # === PATIENT INFO HANDLERS ===
     
+    def _check_correction_intent(self, user_input: str) -> Optional[AgentResponse]:
+        """Check for correction intent globally - user wants to fix something."""
+        lower_input = user_input.lower()
+        
+        # Patterns indicating user wants to correct something
+        correction_patterns = [
+            r"(name|that).*(wrong|incorrect|not right|mistake)",
+            r"(wrong|incorrect|not right).*(name|that)",
+            r"you (got|have) .*(wrong|incorrect)",
+            r"that's not (my|correct|right)",
+            r"i (didn't|did not) say",
+            r"(change|correct|fix|update) (my|the)",
+            r"let me (correct|fix|change)",
+            r"go back",
+        ]
+        
+        for pattern in correction_patterns:
+            if re.search(pattern, lower_input):
+                logger.info("correction_intent_detected", pattern=pattern)
+                return self._handle_correction_request(lower_input)
+        
+        return None
+    
+    def _handle_correction_request(self, user_input: str) -> AgentResponse:
+        """Handle user wanting to correct information."""
+        lower_input = user_input.lower()
+        
+        # Detect what they want to correct
+        if "name" in lower_input:
+            self.context.state = AgentState.COLLECTING_NAME
+            self.context.patient.full_name = None
+            return AgentResponse(text="No problem. What is your correct name?")
+        elif "birth" in lower_input or "dob" in lower_input or "date" in lower_input:
+            self.context.state = AgentState.COLLECTING_DOB
+            self.context.patient.date_of_birth = None
+            return AgentResponse(text="No problem. What is your correct date of birth?")
+        elif "phone" in lower_input or "number" in lower_input:
+            self.context.state = AgentState.COLLECTING_PHONE
+            self.context.patient.phone = None
+            return AgentResponse(text="No problem. What is your correct phone number?")
+        elif "day" in lower_input or "date" in lower_input:
+            self.context.state = AgentState.COLLECTING_DAY
+            self.context.preferred_day = None
+            return AgentResponse(text="No problem. What day would you prefer?")
+        elif "time" in lower_input:
+            self.context.state = AgentState.COLLECTING_TIME
+            self.context.preferred_time = None
+            return AgentResponse(text="No problem. What time works for you?")
+        else:
+            # Generic - ask what to change
+            return AgentResponse(
+                text="I understand you want to make a correction. "
+                     "What would you like to change: your name, date of birth, phone, day, or time?"
+            )
+
     def _handle_consent(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
         """Handle consent collection."""
         input_lower = user_input.lower()
@@ -227,13 +282,20 @@ class ToolCallingAgent:
         name = self._extract_name(user_input)
         
         if name:
+            # Heuristic: single very short name is likely ASR error
+            if len(name) < 3 or (len(name.split()) == 1 and len(name) < 4):
+                logger.info("name_too_short", name=name)
+                return AgentResponse(
+                    text=f"I heard '{name}'. Could you say your full name, first and last?"
+                )
+            
             self.context.patient.full_name = name
             self.context.state = AgentState.COLLECTING_DOB
             
             logger.info("name_collected", name_masked=name[:3] + "***")
             
             return AgentResponse(
-                text=f"Thank you, {name.split()[0]}. And what is your date of birth?"
+                text=f"Thanks {name.split()[0]}. If I got that wrong, just say so. What's your date of birth?"
             )
         else:
             return AgentResponse(
@@ -251,7 +313,7 @@ class ToolCallingAgent:
             logger.info("dob_collected", year=dob.split("/")[-1] if "/" in dob else "***")
             
             return AgentResponse(
-                text="Got it. And what's the best phone number to reach you?"
+                text=f"Got it, {dob}. What's the best phone number to reach you?"
             )
         else:
             # Allow skip for DOB
@@ -296,22 +358,25 @@ class ToolCallingAgent:
     # === EXTRACTION HELPERS ===
     
     def _extract_name(self, text: str) -> Optional[str]:
-        """Extract name from text - lenient for ASR errors."""
+        """Extract name from text with production heuristics."""
         # Remove common prefixes
-        text = re.sub(r"^(my name is|i'm|i am|this is|it's|name is)\s*", "", text.lower()).strip()
+        text = re.sub(r"^(my name is|i'm|i am|this is|it's|name is|call me)\s*", "", text.lower()).strip()
         
         # Remove punctuation
         text = re.sub(r"[.,!?]", "", text)
         
-        # Get words that look like name parts (letters only, allow some ASR errors)
+        # Get words that look like name parts
         words = text.split()
         name_words = []
         
+        # Common non-name words (ASR artifacts, filler words)
+        skip_words = {"the", "is", "my", "its", "and", "to", "a", "an", "for", "of", "um", "uh"}
+        
         for word in words[:4]:  # Take up to 4 words
-            # Skip very short words and common non-name words
+            # Skip very short words (except valid short names like "Al", "Bo", "Jo")
             if len(word) < 2:
                 continue
-            if word in ("the", "is", "my", "its", "and", "to", "a", "an", "for"):
+            if word in skip_words:
                 continue
             # Accept if mostly letters
             if sum(c.isalpha() for c in word) >= len(word) * 0.7:
