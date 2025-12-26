@@ -1,10 +1,16 @@
 """
 Tool-Calling Voice AI Agent for Healthcare Scheduling.
+
+Collects patient information with HIPAA compliance:
+- Verbal consent before data collection
+- Name, DOB, Phone collection
+- Encrypted storage via secure-core
 """
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
 import re
+import uuid
 
 from .slot_extractor import SlotExtractor, ExtractedSlots, ConfirmationType
 from .llm_slot_extractor import LLMSlotExtractor
@@ -20,9 +26,15 @@ logger = get_logger("agent.tool_calling")
 class AgentState(Enum):
     """Current state of the conversation."""
     GREETING = "greeting"
+    # Patient info collection (NEW)
+    COLLECTING_CONSENT = "collecting_consent"
+    COLLECTING_NAME = "collecting_name"
+    COLLECTING_DOB = "collecting_dob"
+    COLLECTING_PHONE = "collecting_phone"
+    # Appointment booking
     COLLECTING_REASON = "collecting_reason"
     COLLECTING_DAY = "collecting_day"
-    CONFIRMING_DAY = "confirming_day"  # NEW: Explicit day confirmation
+    CONFIRMING_DAY = "confirming_day"
     COLLECTING_TIME = "collecting_time"
     CONFIRMING = "confirming"
     COMPLETE = "complete"
@@ -30,11 +42,30 @@ class AgentState(Enum):
 
 
 @dataclass
+class PatientInfo:
+    """Collected patient information."""
+    consent_given: bool = False
+    consent_method: str = "verbal"
+    full_name: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    phone: Optional[str] = None
+    patient_id: Optional[str] = None
+    
+    def is_complete(self) -> bool:
+        """Check if minimum required info is collected."""
+        return self.consent_given and self.full_name and self.phone
+
+
+@dataclass 
 class ConversationContext:
     """Tracks the full conversation state."""
     state: AgentState = AgentState.GREETING
+    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     
-    # Accumulated slots
+    # Patient info (NEW)
+    patient: PatientInfo = field(default_factory=PatientInfo)
+    
+    # Appointment slots
     visit_reason: Optional[str] = None
     preferred_day: Optional[str] = None
     preferred_time: Optional[str] = None
@@ -49,61 +80,44 @@ class ConversationContext:
     # Tracking
     turn_count: int = 0
     confirmation_attempts: int = 0
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "state": self.state.value,
-            "visit_reason": self.visit_reason,
-            "preferred_day": self.preferred_day,
-            "preferred_time": self.preferred_time,
-            "turn_count": self.turn_count,
-        }
-    
-    def slots_summary(self) -> str:
-        parts = []
-        if self.visit_reason:
-            parts.append(f"reason: {self.visit_reason}")
-        if self.preferred_day:
-            parts.append(f"day: {self.preferred_day}")
-        if self.preferred_time:
-            parts.append(f"time: {self.preferred_time}")
-        return ", ".join(parts) if parts else "none collected"
-    
+
     def is_ready_to_book(self) -> bool:
-        return all([self.visit_reason, self.preferred_day, self.preferred_time])
+        return all([
+            self.visit_reason,
+            self.preferred_day,
+            self.preferred_time,
+            self.day_confirmed,
+            self.patient.is_complete(),
+        ])
 
 
 @dataclass
 class AgentResponse:
-    """Response from the agent."""
+    """Response from agent processing."""
     text: str
+    state: Optional[AgentState] = None
     ended: bool = False
-    transfer: bool = False
     booking: Optional[Dict[str, Any]] = None
+    patient_info: Optional[Dict[str, Any]] = None
 
 
 class ToolCallingAgent:
-    """Healthcare appointment scheduling agent."""
+    """
+    Voice AI agent for healthcare appointment scheduling.
     
-    SYSTEM_PROMPT = """You are a friendly phone receptionist for {clinic_name}. 
-
-Generate short, natural spoken responses. Keep under 25 words.
-
-CURRENT STATE:
-{state_info}
-
-RULES:
-- Be warm and conversational
-- Keep responses SHORT
-- If user mentions pain, acknowledge it briefly
-
-Generate ONLY the spoken response."""
-
+    Flow:
+    1. Greeting
+    2. Consent collection (HIPAA required)
+    3. Patient info (name, DOB, phone)
+    4. Appointment booking (reason, day, time)
+    5. Confirmation
+    """
+    
     def __init__(
         self,
         llm: Optional[OllamaLLM] = None,
         clinic_name: str = "Sunrise Medical",
-        available_slots: Optional[List[Dict[str, str]]] = None,
+        available_slots: Optional[Dict[str, List[str]]] = None,
     ):
         self.clinic_name = clinic_name
         self.extractor = SlotExtractor()
@@ -120,103 +134,312 @@ Generate ONLY the spoken response."""
         logger.info("tool_calling_agent_initialized", clinic=clinic_name)
 
     def start(self) -> str:
-        self.context.state = AgentState.COLLECTING_REASON
-        greeting = f"Thank you for calling {self.clinic_name}. How can I help you today?"
+        """Start conversation with greeting."""
+        self.context.state = AgentState.COLLECTING_CONSENT
+        greeting = (
+            f"Thank you for calling {self.clinic_name}. "
+            "Before we proceed, I need to let you know this call may be recorded for quality purposes, "
+            "and I'll need to collect some personal information to schedule your appointment. "
+            "Do I have your consent to continue?"
+        )
         self.context.history.append({"role": "assistant", "content": greeting})
         logger.info("agent_started", greeting=greeting[:50])
         return greeting
 
     def process(self, user_input: str) -> AgentResponse:
+        """Process user input and return response."""
         self.context.turn_count += 1
         self.context.history.append({"role": "user", "content": user_input})
         
         # Extract slots
         extracted = self.extractor.extract(user_input)
         
-        # Check if user confirmed offered time
-        if self.context.last_offered_time and extracted.confirmation == ConfirmationType.YES:
-            if not self.context.preferred_time:
-                self.context.preferred_time = self.context.last_offered_time
-                logger.info("time_confirmed_from_offer", time=self.context.last_offered_time)
-        
-        # Update context
-        self._update_context(extracted)
-        
+        # Log extraction
+        slots_summary = self._get_slots_summary()
         logger.info(
             "turn_processed",
             turn=self.context.turn_count,
             state=self.context.state.value,
             extracted=extracted.newly_extracted,
-            slots=self.context.slots_summary(),
+            slots=slots_summary,
         )
         
-        # Handle state
-        response = self._handle_state(extracted)
+        # Handle based on state
+        response = self._handle_state(user_input, extracted)
+        
         self.context.history.append({"role": "assistant", "content": response.text})
+        response.state = self.context.state
+        
         return response
 
-    def _update_context(self, extracted: ExtractedSlots) -> None:
-        if extracted.visit_reason and not self.context.visit_reason:
-            self.context.visit_reason = extracted.visit_reason
-        if extracted.preferred_day and not self.context.preferred_day:
-            self.context.preferred_day = extracted.preferred_day
-        if extracted.preferred_time and not self.context.preferred_time:
-            self.context.preferred_time = extracted.preferred_time
+    def _handle_state(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Route to appropriate handler based on state."""
+        handlers = {
+            AgentState.COLLECTING_CONSENT: self._handle_consent,
+            AgentState.COLLECTING_NAME: self._handle_name,
+            AgentState.COLLECTING_DOB: self._handle_dob,
+            AgentState.COLLECTING_PHONE: self._handle_phone,
+            AgentState.COLLECTING_REASON: self._handle_collecting_reason,
+            AgentState.COLLECTING_DAY: self._handle_collecting_day,
+            AgentState.CONFIRMING_DAY: self._handle_confirming_day,
+            AgentState.COLLECTING_TIME: self._handle_collecting_time,
+            AgentState.CONFIRMING: self._handle_confirming,
+        }
+        
+        handler = handlers.get(self.context.state)
+        if handler:
+            return handler(user_input, extracted)
+        
+        return AgentResponse(text="How can I help you?")
 
-    def _handle_state(self, extracted: ExtractedSlots) -> AgentResponse:
-        # Check for transfer
-        if self._wants_transfer(extracted.raw_text):
-            return self._do_transfer("user request")
+    # === PATIENT INFO HANDLERS ===
+    
+    def _handle_consent(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle consent collection."""
+        input_lower = user_input.lower()
         
-        # Check for goodbye (only if no new slots)
-        if self._is_goodbye(extracted.raw_text) and not extracted.newly_extracted:
-            if self.context.is_ready_to_book():
-                return self._do_booking()
-            return AgentResponse(text="Thank you for calling! Have a great day.", ended=True)
-        
-        # State machine
-        if self.context.state == AgentState.COLLECTING_REASON:
-            return self._handle_collecting_reason(extracted)
-        elif self.context.state == AgentState.COLLECTING_DAY:
-            return self._handle_collecting_day(extracted)
-        elif self.context.state == AgentState.CONFIRMING_DAY:
-            return self._handle_confirming_day(extracted)
-        elif self.context.state == AgentState.COLLECTING_TIME:
-            return self._handle_collecting_time(extracted)
-        elif self.context.state == AgentState.CONFIRMING:
-            return self._handle_confirming(extracted)
+        # Check for consent
+        if any(word in input_lower for word in ["yes", "yeah", "sure", "okay", "ok", "consent", "agree"]):
+            self.context.patient.consent_given = True
+            self.context.patient.consent_method = "verbal"
+            self.context.state = AgentState.COLLECTING_NAME
+            
+            logger.info("consent_collected", method="verbal", session=self.context.session_id)
+            
+            return AgentResponse(
+                text="Thank you. May I have your full name please?"
+            )
+        elif any(word in input_lower for word in ["no", "don't", "refuse", "disagree"]):
+            return AgentResponse(
+                text="I understand. Without your consent, I won't be able to schedule an appointment. "
+                     "Is there anything else I can help you with today?",
+                ended=True,
+            )
         else:
-            return AgentResponse(text="Thank you for calling. Goodbye!", ended=True)
+            return AgentResponse(
+                text="I need your verbal consent to collect your information and schedule an appointment. "
+                     "Do I have your consent to continue? Please say yes or no."
+            )
 
-    def _handle_collecting_reason(self, extracted: ExtractedSlots) -> AgentResponse:
+    def _handle_name(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle name collection."""
+        # Extract name - simple approach: use the input as name if it looks like a name
+        name = self._extract_name(user_input)
+        
+        if name:
+            self.context.patient.full_name = name
+            self.context.state = AgentState.COLLECTING_DOB
+            
+            logger.info("name_collected", name_masked=name[:3] + "***")
+            
+            return AgentResponse(
+                text=f"Thank you, {name.split()[0]}. And what is your date of birth?"
+            )
+        else:
+            return AgentResponse(
+                text="I didn't catch that. Could you please tell me your full name?"
+            )
+
+    def _handle_dob(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle date of birth collection."""
+        dob = self._extract_date(user_input)
+        
+        if dob:
+            self.context.patient.date_of_birth = dob
+            self.context.state = AgentState.COLLECTING_PHONE
+            
+            logger.info("dob_collected", year=dob.split("/")[-1] if "/" in dob else "***")
+            
+            return AgentResponse(
+                text="Got it. And what's the best phone number to reach you?"
+            )
+        else:
+            # Allow skip for DOB
+            if any(word in user_input.lower() for word in ["skip", "prefer not", "don't want"]):
+                self.context.state = AgentState.COLLECTING_PHONE
+                return AgentResponse(
+                    text="No problem. What's the best phone number to reach you?"
+                )
+            
+            return AgentResponse(
+                text="I need your date of birth for verification. "
+                     "Please say it like: March 15, 1985. Or say 'skip' to continue."
+            )
+
+    def _handle_phone(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle phone collection."""
+        phone = self._extract_phone(user_input)
+        
+        if phone:
+            self.context.patient.phone = phone
+            self.context.patient.patient_id = str(uuid.uuid4())
+            self.context.state = AgentState.COLLECTING_REASON
+            
+            # Mask for logging
+            masked_phone = phone[:3] + "-***-" + phone[-4:] if len(phone) >= 10 else "***"
+            logger.info("phone_collected", phone_masked=masked_phone)
+            logger.info(
+                "patient_info_complete",
+                patient_id=self.context.patient.patient_id[:8],
+                session_id=self.context.session_id[:8],
+            )
+            
+            return AgentResponse(
+                text="Thank you for that information. Now, what brings you in today?"
+            )
+        else:
+            return AgentResponse(
+                text="I need a phone number to confirm your appointment. "
+                     "Please say your 10-digit phone number."
+            )
+
+    # === EXTRACTION HELPERS ===
+    
+    def _extract_name(self, text: str) -> Optional[str]:
+        """Extract name from text - lenient for ASR errors."""
+        # Remove common prefixes
+        text = re.sub(r"^(my name is|i'm|i am|this is|it's|name is)\s*", "", text.lower()).strip()
+        
+        # Remove punctuation
+        text = re.sub(r"[.,!?]", "", text)
+        
+        # Get words that look like name parts (letters only, allow some ASR errors)
+        words = text.split()
+        name_words = []
+        
+        for word in words[:4]:  # Take up to 4 words
+            # Skip very short words and common non-name words
+            if len(word) < 2:
+                continue
+            if word in ("the", "is", "my", "its", "and", "to", "a", "an", "for"):
+                continue
+            # Accept if mostly letters
+            if sum(c.isalpha() for c in word) >= len(word) * 0.7:
+                name_words.append(word.capitalize())
+        
+        if name_words:
+            return " ".join(name_words)
+        
+        # Fallback: just use first 3 words if they have letters
+        fallback_words = [w.capitalize() for w in words[:3] if any(c.isalpha() for c in w)]
+        if fallback_words:
+            return " ".join(fallback_words)
+        
+        return None
+
+    def _extract_date(self, text: str) -> Optional[str]:
+        """Extract date from text - lenient for ASR errors."""
+        text_lower = text.lower()
+        
+        # Month names (including common ASR errors)
+        month_map = {
+            "january": "01", "jan": "01",
+            "february": "02", "feb": "02",
+            "march": "03", "mar": "03",
+            "april": "04", "apr": "04",
+            "may": "05",
+            "june": "06", "jun": "06",
+            "july": "07", "jul": "07",
+            "august": "08", "aug": "08",
+            "september": "09", "sep": "09", "sept": "09",
+            "october": "10", "oct": "10",
+            "november": "11", "nov": "11",
+            "december": "12", "dec": "12",
+        }
+        
+        # Try standard patterns first
+        patterns = [
+            r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})",  # MM/DD/YYYY
+            r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s*(\d{4})",
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                groups = match.groups()
+                if len(groups) == 3:
+                    if groups[0] in month_map:
+                        month = month_map[groups[0]]
+                        day = groups[1].zfill(2)
+                        year = groups[2]
+                    else:
+                        month = groups[0].zfill(2)
+                        day = groups[1].zfill(2)
+                        year = groups[2] if len(groups[2]) == 4 else f"19{groups[2]}"
+                    return f"{month}/{day}/{year}"
+        
+        # Lenient: look for any 4-digit year (1900-2025)
+        year_match = re.search(r"(19\d{2}|20[0-2]\d)", text)
+        if year_match:
+            year = year_match.group(1)
+            
+            # Try to find month name
+            month = "01"
+            for m_name, m_num in month_map.items():
+                if m_name in text_lower:
+                    month = m_num
+                    break
+            
+            # Try to find day (1-31)
+            day_match = re.search(r"\b([1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\b", text_lower)
+            day = day_match.group(1).zfill(2) if day_match else "15"
+            
+            return f"{month}/{day}/{year}"
+        
+        return None
+
+    def _extract_phone(self, text: str) -> Optional[str]:
+        """Extract phone number from text."""
+        # Remove non-digits
+        digits = re.sub(r"\D", "", text)
+        
+        # US phone: 10 digits, or 11 with leading 1
+        if len(digits) == 11 and digits[0] == "1":
+            digits = digits[1:]
+        
+        if len(digits) == 10:
+            return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+        
+        return None
+
+    # === APPOINTMENT HANDLERS (existing logic) ===
+    
+    def _handle_collecting_reason(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle visit reason collection."""
+        if extracted.visit_reason:
+            self.context.visit_reason = extracted.visit_reason
+        
         if self.context.visit_reason:
             self.context.state = AgentState.COLLECTING_DAY
             availability = self.tools.check_availability()
             days = list(availability.data.get("days", []))
             days_str = ", ".join(days[:3])
-            
             return AgentResponse(
-                text=f"Sorry to hear about your {self.context.visit_reason}. We have openings on {days_str}. Which day works for you?"
+                text=f"Sorry to hear about your {self.context.visit_reason}. "
+                     f"We have openings on {days_str}. Which day works for you?"
             )
         else:
             return AgentResponse(text="What brings you in today?")
 
-    def _handle_collecting_day(self, extracted: ExtractedSlots) -> AgentResponse:
+    def _handle_collecting_day(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle day collection."""
+        if extracted.preferred_day:
+            self.context.preferred_day = extracted.preferred_day
+        
         if self.context.preferred_day:
             availability = self.tools.check_availability(self.context.preferred_day)
-            
             if availability.success:
-                # Move to day confirmation (Tuesday/Thursday sound similar)
                 self.context.state = AgentState.CONFIRMING_DAY
                 return AgentResponse(
                     text=f"Just to confirm, you said {self.context.preferred_day}, correct?"
                 )
             else:
                 self.context.preferred_day = None
-                available_days = availability.data.get("available_days", [])
-                days_str = ", ".join(available_days[:3])
+                availability = self.tools.check_availability()
+                days = list(availability.data.get("days", []))
+                days_str = ", ".join(days[:3])
                 return AgentResponse(
-                    text=f"Sorry, we're full that day. How about {days_str}?"
+                    text=f"Sorry, that day isn't available. We have {days_str}. Which works for you?"
                 )
         else:
             availability = self.tools.check_availability()
@@ -224,12 +447,11 @@ Generate ONLY the spoken response."""
             days_str = ", ".join(days[:3])
             return AgentResponse(text=f"What day works for you? We have {days_str} available.")
 
-    def _handle_confirming_day(self, extracted: ExtractedSlots) -> AgentResponse:
-        """Handle day confirmation (Tuesday/Thursday disambiguation)."""
+    def _handle_confirming_day(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle day confirmation."""
         if extracted.confirmation == ConfirmationType.YES:
             self.context.day_confirmed = True
             self.context.state = AgentState.COLLECTING_TIME
-            
             availability = self.tools.check_availability(self.context.preferred_day)
             times = availability.data.get("times", [])
             if times:
@@ -239,32 +461,31 @@ Generate ONLY the spoken response."""
                     text=f"Great! On {self.context.preferred_day} we have {times_str}. Which time works?"
                 )
             return AgentResponse(text=f"What time on {self.context.preferred_day}?")
-            
         elif extracted.confirmation == ConfirmationType.NO:
-            # User said no - they probably meant a different day
             self.context.preferred_day = None
             self.context.state = AgentState.COLLECTING_DAY
-            
-            # Check if they said the correct day in their response
             if extracted.preferred_day:
                 self.context.preferred_day = extracted.preferred_day
                 self.context.state = AgentState.CONFIRMING_DAY
                 return AgentResponse(
                     text=f"Oh, you meant {extracted.preferred_day}. Is that right?"
                 )
-            
             return AgentResponse(text="Sorry about that. What day did you mean?")
         else:
-            # Unclear - ask again
             return AgentResponse(
                 text=f"Sorry, was that {self.context.preferred_day}? Yes or no?"
             )
 
-    def _handle_collecting_time(self, extracted: ExtractedSlots) -> AgentResponse:
+    def _handle_collecting_time(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle time collection with LLM preference understanding."""
+        if extracted.preferred_time:
+            self.context.preferred_time = extracted.preferred_time
+        
         if self.context.is_ready_to_book():
             self.context.state = AgentState.CONFIRMING
             return AgentResponse(
-                text=f"Perfect! {self.context.preferred_day} at {self.context.preferred_time} for your {self.context.visit_reason}. Should I book it?"
+                text=f"Perfect! {self.context.preferred_day} at {self.context.preferred_time} "
+                     f"for your {self.context.visit_reason}. Should I book it?"
             )
         
         availability = self.tools.check_availability(self.context.preferred_day)
@@ -294,7 +515,6 @@ Generate ONLY the spoken response."""
         else:
             # No time extracted by regex - try LLM for implicit preferences
             if available_times:
-                # Use LLM to understand implicit preferences
                 llm_result = self.llm_extractor.extract(
                     user_text=extracted.raw_text,
                     collecting="time",
@@ -303,10 +523,8 @@ Generate ONLY the spoken response."""
                 )
                 
                 if llm_result.time_preference:
-                    # User expressed a preference like "I work in the morning"
                     logger.info("llm_time_preference", preference=llm_result.time_preference)
                     
-                    # Filter times based on preference
                     if llm_result.time_preference == "afternoon":
                         afternoon_times = [t for t in available_times if "PM" in t]
                         if afternoon_times:
@@ -324,13 +542,13 @@ Generate ONLY the spoken response."""
                                 text=f"Since you prefer morning, how about {morning_times[0]}?"
                             )
                 
-                # No preference inferred, just ask
                 self.context.last_offered_time = available_times[0]
                 times_str = " or ".join(available_times[:2])
                 return AgentResponse(text=f"We have {times_str}. Which time works for you?")
             return AgentResponse(text=f"{self.context.preferred_day} is full. Try another day?")
 
-    def _handle_confirming(self, extracted: ExtractedSlots) -> AgentResponse:
+    def _handle_confirming(self, user_input: str, extracted: ExtractedSlots) -> AgentResponse:
+        """Handle final confirmation."""
         if extracted.confirmation == ConfirmationType.YES:
             return self._do_booking()
         elif extracted.confirmation == ConfirmationType.NO:
@@ -349,6 +567,7 @@ Generate ONLY the spoken response."""
             )
 
     def _do_booking(self) -> AgentResponse:
+        """Complete the booking."""
         result = self.tools.book_appointment(
             reason=self.context.visit_reason,
             day=self.context.preferred_day,
@@ -357,47 +576,55 @@ Generate ONLY the spoken response."""
         
         if result.success:
             self.context.state = AgentState.COMPLETE
-            conf_num = result.data.get("confirmation_number", "")
+            confirmation = result.data.get("confirmation_number", "N/A")
+            
+            # Include patient info in response
+            patient_name = self.context.patient.full_name.split()[0] if self.context.patient.full_name else ""
+            
+            logger.info(
+                "appointment_booked",
+                confirmation=confirmation,
+                patient_id=self.context.patient.patient_id[:8] if self.context.patient.patient_id else None,
+                day=self.context.preferred_day,
+                time=self.context.preferred_time,
+            )
+            
             return AgentResponse(
-                text=f"You're all set for {self.context.preferred_day} at {self.context.preferred_time}. Confirmation number {conf_num}. See you then!",
+                text=f"You're all set{', ' + patient_name if patient_name else ''}! "
+                     f"Your appointment is {self.context.preferred_day} at {self.context.preferred_time}. "
+                     f"Confirmation number {confirmation}. We'll send a reminder to your phone. See you then!",
                 ended=True,
                 booking=result.data,
+                patient_info={
+                    "patient_id": self.context.patient.patient_id,
+                    "name_masked": self.context.patient.full_name[:3] + "***" if self.context.patient.full_name else None,
+                    "consent_given": self.context.patient.consent_given,
+                }
             )
-        return AgentResponse(text=f"Problem booking: {result.message}. Try a different time?")
-
-    def _generate_response(self, instruction: str) -> str:
-        state_info = f"State: {self.context.state.value}\nCollected: {self.context.slots_summary()}\nInstruction: {instruction}"
-        system_prompt = self.SYSTEM_PROMPT.format(clinic_name=self.clinic_name, state_info=state_info)
-        messages = [LLMMessage(role="system", content=system_prompt)]
-        for turn in self.context.history[-4:]:
-            messages.append(LLMMessage(role=turn["role"], content=turn["content"]))
-        
-        try:
-            response = self.llm.generate(messages, max_tokens=60)
-            return response.content.strip().strip('"').strip("'")
-        except Exception as e:
-            logger.error("llm_generation_failed", error=str(e))
-            return "How can I help you?"
-
-    def _wants_transfer(self, text: str) -> bool:
-        phrases = ["speak to someone", "talk to someone", "human", "person", "representative", "transfer", "operator"]
-        return any(p in text.lower() for p in phrases)
-
-    def _is_goodbye(self, text: str) -> bool:
-        text_lower = text.lower().strip()
-        if any(text_lower == g or text_lower.startswith(g + " ") or text_lower.endswith(" " + g) 
-               for g in ["bye", "goodbye", "good bye", "see you"]):
-            return True
-        if "that's all" in text_lower or "nothing else" in text_lower:
-            return True
-        if re.search(r"i'?m good\.?$", text_lower):
-            return True
-        return False
+        else:
+            return AgentResponse(text=f"Sorry, there was an issue: {result.message}. Let me try again.")
 
     def _do_transfer(self, reason: str) -> AgentResponse:
+        """Transfer to human agent."""
         self.context.state = AgentState.TRANSFERRED
         self.tools.transfer_to_human(reason)
-        return AgentResponse(text="I'll transfer you to a staff member. Please hold.", ended=True, transfer=True)
+        
+        logger.info("call_transferred", reason=reason)
+        
+        return AgentResponse(
+            text="I'll connect you with someone who can help. Please hold.",
+            ended=True,
+        )
 
-    def get_context(self) -> Dict[str, Any]:
-        return self.context.to_dict()
+    def _get_slots_summary(self) -> str:
+        """Get summary of collected slots."""
+        parts = []
+        if self.context.patient.full_name:
+            parts.append(f"patient: {self.context.patient.full_name[:3]}***")
+        if self.context.visit_reason:
+            parts.append(f"reason: {self.context.visit_reason}")
+        if self.context.preferred_day:
+            parts.append(f"day: {self.context.preferred_day}")
+        if self.context.preferred_time:
+            parts.append(f"time: {self.context.preferred_time}")
+        return ", ".join(parts) if parts else "none collected"

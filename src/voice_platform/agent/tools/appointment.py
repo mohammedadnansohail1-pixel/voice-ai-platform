@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-from ..logging import get_logger
+from ...logging import get_logger
 from .database import AppointmentDatabase
 
 logger = get_logger("agent.tools")

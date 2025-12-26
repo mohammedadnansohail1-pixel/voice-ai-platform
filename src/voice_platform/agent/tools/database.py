@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
-from ..logging import get_logger
+from ...logging import get_logger
 
 logger = get_logger("agent.database")
 

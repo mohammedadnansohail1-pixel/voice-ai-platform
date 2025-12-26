@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from enum import Enum
 
-from ..logging import get_logger
+from ...logging import get_logger
 
 logger = get_logger("agent.slot_extractor")
 

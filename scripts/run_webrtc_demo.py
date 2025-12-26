@@ -30,6 +30,10 @@ from voice_platform.agent import ToolCallingAgent
 
 # Contextual prompts per state (this is what production systems do)
 STATE_PROMPTS = {
+    "collecting_consent": "Patient consent. Patient says yes, no, agree, consent, okay.",
+    "collecting_name": "Patient stating their full name. Names like John Smith, Mohammed Ali, Sarah Johnson.",
+    "collecting_dob": "Patient stating date of birth. Dates like March 15 1985, January 1 1990, 03/15/1985.",
+    "collecting_phone": "Patient stating phone number. 10 digit US phone numbers like 555-123-4567.",
     "collecting_reason": "Medical appointment. Patient describing symptoms: toothache, headache, back pain, checkup.",
     "collecting_day": "Selecting appointment day: Monday, Tuesday, Wednesday, Thursday, Friday.",
     "confirming_day": "Confirming day. Patient says yes, no, correct, or a day name.",

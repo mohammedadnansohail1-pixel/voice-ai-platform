@@ -97,6 +97,74 @@ class MetricsConfig(BaseModel):
     port: int = 9090
 
 
+
+
+class EventBusConfig(BaseModel):
+    """Event bus settings for multi-agent coordination."""
+    backend: str = "redis"  # redis, kafka (future)
+    redis_url: str = "redis://:Adsohnan213!456@localhost:6379/0"
+    channel_prefix: str = "voice_ai"  # Namespace: {prefix}:{tenant}:{event_type}
+    
+    # Redis-specific
+    redis_max_connections: int = 10
+    redis_socket_timeout: float = 5.0
+    
+    # Future Kafka settings (ignored when backend=redis)
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_consumer_group: str = "voice_ai_agents"
+
+
+class CheckpointConfig(BaseModel):
+    """Checkpoint/recovery settings for long-running agent calls."""
+    backend: str = "postgresql"  # postgresql, sqlite (dev only)
+    
+    # PostgreSQL connection
+    dsn: str = "postgresql://postgres:postgres@localhost:5432/voice_ai"
+    
+    # SQLite fallback (for local dev without postgres)
+    sqlite_path: str = "data/checkpoints.db"
+    
+    # Retention
+    retention_hours: int = 72  # Delete checkpoints older than this
+    
+    # Checkpointing behavior
+    auto_checkpoint_interval_s: int = 60  # For long holds (payer agent)
+    checkpoint_on_state_change: bool = True  # Checkpoint at each state transition
+
+
+
+class EventBusConfig(BaseModel):
+    """Event bus settings for multi-agent coordination."""
+    backend: str = "redis"  # redis, kafka (future)
+    redis_url: str = "redis://:Adsohnan213!456@localhost:6379/0"
+    channel_prefix: str = "voice_ai"  # Namespace: {prefix}:{tenant}:{event_type}
+    
+    # Redis-specific
+    redis_max_connections: int = 10
+    redis_socket_timeout: float = 5.0
+    
+    # Future Kafka settings (ignored when backend=redis)
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_consumer_group: str = "voice_ai_agents"
+
+
+class CheckpointConfig(BaseModel):
+    """Checkpoint/recovery settings for long-running agent calls."""
+    backend: str = "postgresql"  # postgresql, sqlite (dev only)
+    
+    # PostgreSQL connection
+    dsn: str = "postgresql://postgres:postgres@localhost:5432/voice_ai"
+    
+    # SQLite fallback (for local dev without postgres)
+    sqlite_path: str = "data/checkpoints.db"
+    
+    # Retention
+    retention_hours: int = 72  # Delete checkpoints older than this
+    
+    # Checkpointing behavior
+    auto_checkpoint_interval_s: int = 60  # For long holds (payer agent)
+    checkpoint_on_state_change: bool = True  # Checkpoint at each state transition
+
 class TenantConfig(BaseModel):
     """Tenant identification."""
     id: str = "default"
@@ -116,6 +184,10 @@ class Config(BaseModel):
     telephony: TelephonyConfig = Field(default_factory=TelephonyConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    event_bus: EventBusConfig = Field(default_factory=EventBusConfig)
+    checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
+    event_bus: EventBusConfig = Field(default_factory=EventBusConfig)
+    checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
 
 
 def load_config(path: Optional[str] = None) -> Config:
@@ -145,6 +217,14 @@ def load_config(path: Optional[str] = None) -> Config:
         "VP_LOG_LEVEL": ("logging", "level"),
         "VP_TELEPHONY_ACCOUNT_SID": ("telephony", "account_sid"),
         "VP_TELEPHONY_AUTH_TOKEN": ("telephony", "auth_token"),
+        "VP_EVENT_BUS_BACKEND": ("event_bus", "backend"),
+        "VP_EVENT_BUS_REDIS_URL": ("event_bus", "redis_url"),
+        "VP_CHECKPOINT_BACKEND": ("checkpoint", "backend"),
+        "VP_CHECKPOINT_DSN": ("checkpoint", "dsn"),
+        "VP_EVENT_BUS_BACKEND": ("event_bus", "backend"),
+        "VP_EVENT_BUS_REDIS_URL": ("event_bus", "redis_url"),
+        "VP_CHECKPOINT_BACKEND": ("checkpoint", "backend"),
+        "VP_CHECKPOINT_DSN": ("checkpoint", "dsn"),
     }
     
     for env_var, (section, key) in env_mappings.items():

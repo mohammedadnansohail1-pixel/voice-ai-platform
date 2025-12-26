@@ -6,9 +6,9 @@ Uses LLM to understand implicit preferences that regex can't catch.
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
-from ..llm.ollama import OllamaLLM
-from ..core.config import LLMConfig
-from ..logging import get_logger
+from ...llm.ollama import OllamaLLM
+from ...core.config import LLMConfig
+from ...logging import get_logger
 
 logger = get_logger("agent.llm_extractor")
 
@@ -98,7 +98,7 @@ JSON:"""
         )
         
         try:
-            from ..core.types import LLMMessage
+            from ...core.types import LLMMessage
             messages = [LLMMessage(role="user", content=prompt)]
             response = self.llm.generate(messages, max_tokens=150).content
             
