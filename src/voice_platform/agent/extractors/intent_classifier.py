@@ -238,11 +238,18 @@ class IntentClassifier:
         """Extract the corrected value from correction statement."""
         lower = text.lower()
         
-        if context == "name":
-            # "Actually, my name is John Smith"
-            match = re.search(r"(?:name is|it'?s?|i'?m)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", text)
-            if match:
-                return match.group(1).title()
+        # Always check for name correction regardless of context
+        # "my name is Jane Doe", "name is actually Jane"
+        name_match = re.search(r"(?:my name is|name is|i'?m|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", text, re.IGNORECASE)
+        if name_match:
+            return name_match.group(1).title()
+        
+        # Check for DOB correction
+        if "birth" in lower or "born" in lower:
+            # Try to find date pattern
+            date_match = re.search(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+ \d{1,2},? \d{4})", text)
+            if date_match:
+                return date_match.group(1)
         
         return None
     

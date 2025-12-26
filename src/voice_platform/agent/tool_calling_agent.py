@@ -131,6 +131,7 @@ class ToolCallingAgent:
         else:
             self.llm = llm
         
+        self.intent_classifier = IntentClassifier(llm=self.llm)
         self.context = ConversationContext()
         logger.info("tool_calling_agent_initialized", clinic=clinic_name)
 
@@ -152,6 +153,12 @@ class ToolCallingAgent:
         self.context.turn_count += 1
         self.context.history.append({"role": "user", "content": user_input})
         
+        # Check for correction/refusal intent FIRST
+        correction_response = self._check_correction_intent(user_input)
+        if correction_response:
+            self.context.history.append({"role": "assistant", "content": correction_response.text})
+            return correction_response
+
         # Extract slots
         extracted = self.extractor.extract(user_input)
         
@@ -238,11 +245,26 @@ class ToolCallingAgent:
                 text="Would you like to cancel this appointment booking? Say yes to cancel or no to continue."
             )
     
-    def _handle_correction_request(self, user_input: str) -> AgentResponse:
+    def _handle_correction_request(self, user_input: str, extracted_value: Optional[str] = None) -> AgentResponse:
         """Handle user wanting to correct information."""
         lower_input = user_input.lower()
         
-        # Detect what they want to correct
+        # If we extracted a new name directly, use it
+        if extracted_value and "name" in lower_input:
+            self.context.patient.full_name = extracted_value
+            # Go back to DOB collection (or wherever appropriate)
+            if not self.context.patient.date_of_birth:
+                self.context.state = AgentState.COLLECTING_DOB
+                logger.info("name_corrected", new_name=extracted_value[:3] + "***")
+                return AgentResponse(
+                    text=f"Got it, {extracted_value.split()[0]}. What's your date of birth?"
+                )
+            else:
+                return AgentResponse(
+                    text=f"Updated to {extracted_value.split()[0]}. Is there anything else to correct?"
+                )
+        
+        # Detect what they want to correct (no value extracted)
         if "name" in lower_input:
             self.context.state = AgentState.COLLECTING_NAME
             self.context.patient.full_name = None
