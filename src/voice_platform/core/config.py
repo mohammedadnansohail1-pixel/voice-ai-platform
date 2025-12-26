@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+from .exceptions import ConfigNotFoundError, ConfigValidationError
+
+# Logger setup (avoiding circular import)
+import logging
+logger = logging.getLogger("voice_platform.core.config")
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 
@@ -201,8 +207,15 @@ def load_config(path: Optional[str] = None) -> Config:
     if path:
         config_path = Path(path)
         if config_path.exists():
-            with open(config_path) as f:
-                config_data = yaml.safe_load(f) or {}
+            try:
+                with open(config_path) as f:
+                    config_data = yaml.safe_load(f) or {}
+                logger.info(f"config_loaded: {path}")
+            except yaml.YAMLError as e:
+                logger.error(f"config_parse_error: {path} - {e}")
+                raise ConfigValidationError(f"Invalid YAML in {path}: {e}") from e
+        else:
+            logger.warning(f"config_not_found: {path}, using defaults")
     
     # Environment variable overrides (VP_ prefix)
     env_mappings = {

@@ -6,6 +6,7 @@ from typing import Optional
 from ..core.registry import vad_registry
 from ..core.config import VADConfig
 from ..logging import get_logger
+from ..core.exceptions import ModelLoadError, ModelInferenceError
 from .base import BaseVAD, VADResult
 
 logger = get_logger("vad.silero")
