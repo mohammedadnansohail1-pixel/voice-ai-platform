@@ -1,0 +1,72 @@
+# State definitions - questions, transitions, and metadata
+states:
+  collecting_consent:
+    question: "Do I have your consent to continue?"
+    required: true
+    field: consent
+    transitions:
+      on_confirm: collecting_name
+      on_refuse: complete
+    
+  collecting_name:
+    question: "May I have your full name please?"
+    required: true
+    field: name
+    implicit_confirmation: "Thanks {value}. If I got that wrong, just let me know."
+    transitions:
+      on_accept: collecting_dob
+      on_skip: null  # Cannot skip
+    
+  collecting_dob:
+    question: "What is your date of birth?"
+    required: true
+    field: dob
+    implicit_confirmation: "Got it, {value}."
+    transitions:
+      on_accept: collecting_phone
+      on_skip: collecting_phone  # Can skip with warning
+    
+  collecting_phone:
+    question: "What's the best phone number to reach you?"
+    required: true
+    field: phone
+    implicit_confirmation: "Got it, {value}."
+    transitions:
+      on_accept: collecting_reason
+      on_skip: null
+    
+  collecting_reason:
+    question: "What brings you in today?"
+    required: true
+    field: reason
+    transitions:
+      on_accept: collecting_day
+      on_skip: collecting_day
+    
+  collecting_day:
+    question: "What day works for you? We have {available_days} available."
+    required: true
+    field: day
+    transitions:
+      on_accept: collecting_time
+      on_skip: null
+    
+  collecting_time:
+    question: "What time works for you? We have {available_times} available."
+    required: true
+    field: time
+    transitions:
+      on_accept: confirming
+      on_skip: null
+    
+  confirming:
+    question: "{day} at {time}. Should I book this appointment?"
+    required: true
+    field: confirmation
+    transitions:
+      on_confirm: complete
+      on_deny: collecting_day  # Go back to change
+    
+  complete:
+    question: null
+    is_terminal: true

@@ -1,0 +1,157 @@
+# Few-shot examples for LLM classification
+
+examples:
+  # === CONSENT STAGE ===
+  - context:
+      assistant: "Do I have your consent to continue?"
+      state: collecting_consent
+    user: "Yes"
+    classification:
+      intent: confirming
+      action: accept_input
+      extracted_value: null
+      suggested_response: "Thank you. May I have your full name please?"
+      confidence: 0.95
+
+  - context:
+      assistant: "Do I have your consent to continue?"
+      state: collecting_consent
+    user: "No"
+    classification:
+      intent: refusing
+      action: end_call
+      suggested_response: "I understand. If you change your mind, feel free to call back. Have a great day!"
+      confidence: 0.95
+
+  - context:
+      assistant: "Do I have your consent to continue?"
+      state: collecting_consent
+    user: "Sure, go ahead"
+    classification:
+      intent: confirming
+      action: accept_input
+      extracted_value: null
+      suggested_response: "Thank you. May I have your full name please?"
+      confidence: 0.9
+
+  # === NAME COLLECTION ===
+  - context:
+      assistant: "May I have your full name please?"
+      state: collecting_name
+    user: "John Smith"
+    classification:
+      intent: providing_info
+      action: accept_input
+      extracted_value: "John Smith"
+      suggested_response: null
+      confidence: 0.95
+
+  - context:
+      assistant: "May I have your full name please?"
+      state: collecting_name
+    user: "My name is Sarah Johnson"
+    classification:
+      intent: providing_info
+      action: accept_input
+      extracted_value: "Sarah Johnson"
+      suggested_response: null
+      confidence: 0.95
+
+  - context:
+      assistant: "May I have your full name please?"
+      state: collecting_name
+    user: "No"
+    classification:
+      intent: refusing
+      action: ask_again
+      suggested_response: "I need your name to schedule the appointment. Could you please tell me your first and last name?"
+      confidence: 0.85
+
+  - context:
+      assistant: "May I have your full name please?"
+      state: collecting_name
+    user: "Hello"
+    classification:
+      intent: off_topic
+      action: ask_again
+      suggested_response: "Hi! May I have your full name please?"
+      confidence: 0.9
+
+  # === DOB COLLECTION ===
+  - context:
+      assistant: "What is your date of birth?"
+      state: collecting_dob
+    user: "March 15 1990"
+    classification:
+      intent: providing_info
+      action: accept_input
+      extracted_value: "03/15/1990"
+      suggested_response: null
+      confidence: 0.95
+
+  - context:
+      assistant: "What is your date of birth?"
+      state: collecting_dob
+    user: "January 5th, 1985"
+    classification:
+      intent: providing_info
+      action: accept_input
+      extracted_value: "01/05/1985"
+      suggested_response: null
+      confidence: 0.95
+
+  # === CORRECTIONS (from any state) ===
+  - context:
+      assistant: "What is your date of birth?"
+      state: collecting_dob
+    user: "That's wrong, my name is Jane"
+    classification:
+      intent: correcting
+      action: correct_field
+      extracted_value: "Jane"
+      field_to_correct: "name"
+      suggested_response: "Got it, Jane. What's your date of birth?"
+      confidence: 0.9
+
+  - context:
+      assistant: "What is your date of birth?"
+      state: collecting_dob
+    user: "My name is incorrect"
+    classification:
+      intent: denying
+      action: ask_clarification
+      suggested_response: "I apologize. What is your correct name?"
+      confidence: 0.85
+
+  # === PHONE COLLECTION ===
+  - context:
+      assistant: "What's the best phone number to reach you?"
+      state: collecting_phone
+    user: "555-123-4567"
+    classification:
+      intent: providing_info
+      action: accept_input
+      extracted_value: "555-123-4567"
+      suggested_response: null
+      confidence: 0.95
+
+  # === CONFIRMATION ===
+  - context:
+      assistant: "Thursday at 2 PM. Should I book this?"
+      state: confirming
+    user: "Yes"
+    classification:
+      intent: confirming
+      action: accept_input
+      suggested_response: null
+      confidence: 0.95
+
+  - context:
+      assistant: "Thursday at 2 PM. Should I book this?"
+      state: confirming
+    user: "No, I need a different time"
+    classification:
+      intent: denying
+      action: ask_clarification
+      suggested_response: "No problem. What time would work better for you?"
+      confidence: 0.9

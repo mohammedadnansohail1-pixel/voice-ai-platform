@@ -1,0 +1,47 @@
+# Action definitions - what to do for each action type
+actions:
+  accept_input:
+    description: "Accept the input and proceed"
+    behavior:
+      - use_extracted_value: true
+      - transition: on_accept
+      - use_suggested_response: true
+    
+  ask_again:
+    description: "Re-ask the same question"
+    behavior:
+      - use_suggested_response: true
+      - fallback: current_question
+    
+  ask_clarification:
+    description: "Ask for clarification"
+    behavior:
+      - use_suggested_response: true
+      - fallback: "Could you clarify what you mean?"
+    
+  correct_field:
+    description: "Go back and correct a field"
+    behavior:
+      - clear_field: "{field_to_correct}"
+      - set_state: "collecting_{field_to_correct}"
+      - use_suggested_response: true
+    
+  skip_field:
+    description: "Skip optional field"
+    behavior:
+      - transition: on_skip
+      - use_suggested_response: true
+      - fallback: "No problem, let's continue."
+    
+  end_call:
+    description: "End the conversation gracefully"
+    behavior:
+      - set_state: complete
+      - use_suggested_response: true
+      - fallback: "Thank you for calling. Goodbye!"
+      - log_event: call_ended
+    
+  continue:
+    description: "Continue with normal flow"
+    behavior:
+      - pass_through: true  # Let state handler process

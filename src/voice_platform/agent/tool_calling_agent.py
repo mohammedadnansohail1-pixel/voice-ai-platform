@@ -13,7 +13,7 @@ import re
 import uuid
 
 from .extractors.slot_extractor import SlotExtractor, ExtractedSlots, ConfirmationType
-from .extractors.intent_classifier import IntentClassifier, UserIntent, ClassificationResult
+from .extractors.intent_classifier import IntentClassifier, UserIntent, Action, ClassificationResult
 from .extractors.llm_slot_extractor import LLMSlotExtractor
 from .tools.appointment import AppointmentTools, ToolResponse
 from ..llm.ollama import OllamaLLM
@@ -213,46 +213,87 @@ class ToolCallingAgent:
             AgentState.COLLECTING_TIME: "time",
             AgentState.CONFIRMING: "confirm",
         }
-        context = context_map.get(self.context.state, "general")
-        
-        # Classify intent (fast-path + LLM fallback)
+        state = context_map.get(self.context.state, "general")
+        # Get last assistant message
+        last_message = ""
+        for msg in reversed(self.context.history):
+            if msg.get("role") == "assistant":
+                last_message = msg.get("content", "")[:200]
+                break
+        # Build context dict
+        context = {
+            "state": state,
+            "last_assistant_message": last_message,
+            "collected": {
+                "name": self.context.patient.full_name,
+                "dob": self.context.patient.date_of_birth,
+                "phone": self.context.patient.phone,
+            }
+        }
         result = self.intent_classifier.classify(user_input, context)
         
-        if result.intent == UserIntent.CORRECTING:
-            logger.info("correction_intent_detected", confidence=result.confidence, used_llm=result.used_llm)
-            return self._handle_correction_request(user_input, result.extracted_value)
+        # Use LLM-recommended action instead of hardcoded handlers
+        return self._execute_action(result, user_input)
+    
+    def _execute_action(self, result, user_input: str):
+        """Execute the action using config-driven behavior."""
+        from .extractors.intent_classifier import Action
         
-        if result.intent == UserIntent.REFUSING:
-            logger.info("refusal_detected", confidence=result.confidence)
-            return self._handle_refusal()
+        logger.info(
+            "executing_action",
+            intent=result.intent.value,
+            action=result.action.value,
+            confidence=result.confidence,
+        )
         
-        if result.intent == UserIntent.DENYING and self.context.state != AgentState.CONFIRMING:
-            # User says "no/wrong" but we're not in confirmation - they want to correct
-            logger.info("denial_as_correction", confidence=result.confidence)
-            return self._handle_correction_request(user_input, result.extracted_value)
+        # ACCEPT_INPUT and CONTINUE must return None to let state handlers run
+        if result.action in (Action.ACCEPT_INPUT, Action.CONTINUE):
+            return None
         
-        if result.intent == UserIntent.OFF_TOPIC:
-            # User said something off-topic, gently redirect
-            logger.info("off_topic_detected", confidence=result.confidence)
-            return self._redirect_to_current_question()
+        # END_CALL - terminate
+        if result.action == Action.END_CALL:
+            self.context.state = AgentState.COMPLETE
+            return AgentResponse(text=result.suggested_response or "Goodbye!")
         
+        # CORRECT_FIELD - update field and maybe set state
+        if result.action == Action.CORRECT_FIELD:
+            field = result.field_to_correct
+            if field and result.extracted_value:
+                if field == "name":
+                    self.context.patient.full_name = result.extracted_value
+                elif field == "dob":
+                    self.context.patient.date_of_birth = result.extracted_value
+                elif field == "phone":
+                    self.context.patient.phone = result.extracted_value
+                logger.info("field_corrected", field=field, value=result.extracted_value[:3] + "***" if result.extracted_value else None)
+            elif field:
+                # No value provided, go back to collect it
+                state_map = {"name": AgentState.COLLECTING_NAME, "dob": AgentState.COLLECTING_DOB, "phone": AgentState.COLLECTING_PHONE}
+                if field in state_map:
+                    self.context.state = state_map[field]
+            return AgentResponse(text=result.suggested_response or f"Let me correct your {field}.")
+        
+        # ASK_AGAIN, ASK_CLARIFICATION - return response
+        if result.action in (Action.ASK_AGAIN, Action.ASK_CLARIFICATION):
+            return AgentResponse(text=result.suggested_response or self._get_current_question())
+        
+        # SKIP_FIELD - transition to next state (not implemented for required fields)
+        if result.action == Action.SKIP_FIELD:
+            return AgentResponse(text=result.suggested_response or "Let's continue.")
+        
+        # Default: let normal flow handle
         return None
     
-    def _redirect_to_current_question(self) -> AgentResponse:
-        """Redirect user back to current question."""
-        redirects = {
+    def _get_current_question(self) -> str:
+        questions = {
             AgentState.COLLECTING_CONSENT: "Do I have your consent to continue?",
             AgentState.COLLECTING_NAME: "May I have your full name please?",
             AgentState.COLLECTING_DOB: "What is your date of birth?",
             AgentState.COLLECTING_PHONE: "What's the best phone number to reach you?",
             AgentState.COLLECTING_REASON: "What brings you in today?",
-            AgentState.COLLECTING_DAY: "What day works for you?",
-            AgentState.COLLECTING_TIME: "What time works for you?",
-            AgentState.CONFIRMING: "Should I book this appointment?",
         }
-        question = redirects.get(self.context.state, "How can I help you?")
-        return AgentResponse(text=question)
-    
+        return questions.get(self.context.state, "How can I help you?")
+
     def _handle_refusal(self) -> AgentResponse:
         """Handle user refusing to continue."""
         if self.context.state == AgentState.COLLECTING_CONSENT:

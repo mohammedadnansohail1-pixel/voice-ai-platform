@@ -1,15 +1,25 @@
 """
-Production LLM-based intent classification and entity extraction.
+Config-driven LLM intent classifier.
 
-Fast path: Regex for 80% clear inputs
-Slow path: LLM for 20% ambiguous inputs
+All behavior defined in YAML configs:
+- configs/agent/states.yaml - State definitions
+- configs/agent/actions.yaml - Action definitions  
+- configs/agent/examples.yaml - Few-shot examples
+- configs/agent/prompts.yaml - LLM prompts
 
-Used for name, DOB, phone where ASR errors are common.
+No hardcoded if/else logic.
 """
-from typing import Optional, Tuple
-from dataclasses import dataclass
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+import json
 import re
+import time
+import hashlib
+import yaml
+
+from pydantic import BaseModel, Field, validator
 
 from ...llm.ollama import OllamaLLM
 from ...core.config import LLMConfig
@@ -19,324 +29,446 @@ from ...logging import get_logger
 logger = get_logger("agent.intent_classifier")
 
 
-class UserIntent(Enum):
-    """Classified user intent."""
-    PROVIDING_INFO = "providing_info"      # Giving requested information
-    REFUSING = "refusing"                   # Saying no, refusing to provide
-    CORRECTING = "correcting"               # Wants to fix something
-    CONFIRMING = "confirming"               # Yes, correct, right
-    DENYING = "denying"                     # No, that's wrong
-    OFF_TOPIC = "off_topic"                 # Unrelated to current question
-    UNCLEAR = "unclear"                     # Can't determine
+# ============================================================================
+# Enums (derived from config at runtime)
+# ============================================================================
 
+class UserIntent(str, Enum):
+    PROVIDING_INFO = "providing_info"
+    REFUSING = "refusing"
+    CORRECTING = "correcting"
+    CONFIRMING = "confirming"
+    DENYING = "denying"
+    UNCLEAR = "unclear"
+    OFF_TOPIC = "off_topic"
+
+
+class Action(str, Enum):
+    ACCEPT_INPUT = "accept_input"
+    ASK_AGAIN = "ask_again"
+    ASK_CLARIFICATION = "ask_clarification"
+    CORRECT_FIELD = "correct_field"
+    SKIP_FIELD = "skip_field"
+    END_CALL = "end_call"
+    CONTINUE = "continue"
+
+
+# ============================================================================
+# Config Models (Pydantic)
+# ============================================================================
+
+class StateConfig(BaseModel):
+    """Configuration for a conversation state."""
+    question: Optional[str] = None
+    required: bool = True
+    field: Optional[str] = None
+    implicit_confirmation: Optional[str] = None
+    is_terminal: bool = False
+    transitions: Dict[str, Optional[str]] = Field(default_factory=dict)
+
+
+class ActionConfig(BaseModel):
+    """Configuration for an action."""
+    description: str
+    behavior: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ExampleContext(BaseModel):
+    """Context for a few-shot example."""
+    assistant: str
+    state: str
+
+
+class ExampleClassification(BaseModel):
+    """Expected classification for an example."""
+    intent: str
+    action: str
+    extracted_value: Optional[str] = None
+    field_to_correct: Optional[str] = None
+    suggested_response: Optional[str] = None
+    confidence: float = 0.9
+
+
+class Example(BaseModel):
+    """A few-shot example."""
+    context: ExampleContext
+    user: str
+    classification: ExampleClassification
+
+
+class PromptsConfig(BaseModel):
+    """LLM prompts configuration."""
+    system_prompt: str
+    user_prompt_template: str
+    example_format: str
+
+
+class AgentConfig(BaseModel):
+    """Complete agent configuration."""
+    states: Dict[str, StateConfig] = Field(default_factory=dict)
+    actions: Dict[str, ActionConfig] = Field(default_factory=dict)
+    examples: List[Example] = Field(default_factory=list)
+    prompts: Optional[PromptsConfig] = None
+
+
+# ============================================================================
+# Classification Result
+# ============================================================================
 
 @dataclass
 class ClassificationResult:
     """Result from intent classification."""
     intent: UserIntent
+    action: Action
     extracted_value: Optional[str] = None
+    field_to_correct: Optional[str] = None
+    suggested_response: Optional[str] = None
     confidence: float = 0.0
     used_llm: bool = False
+    latency_ms: float = 0.0
 
+
+# ============================================================================
+# Config Loader
+# ============================================================================
+
+class ConfigLoader:
+    """Loads and validates agent configuration from YAML files."""
+    
+    DEFAULT_CONFIG_DIR = Path("configs/agent")
+    
+    def __init__(self, config_dir: Optional[Path] = None):
+        self.config_dir = config_dir or self.DEFAULT_CONFIG_DIR
+        self._config: Optional[AgentConfig] = None
+    
+    def load(self) -> AgentConfig:
+        """Load all config files."""
+        if self._config:
+            return self._config
+        
+        states = self._load_yaml("states.yaml").get("states", {})
+        actions = self._load_yaml("actions.yaml").get("actions", {})
+        examples_raw = self._load_yaml("examples.yaml").get("examples", [])
+        prompts_raw = self._load_yaml("prompts.yaml")
+        
+        # Parse into Pydantic models
+        parsed_states = {k: StateConfig(**v) for k, v in states.items()}
+        parsed_actions = {k: ActionConfig(**v) for k, v in actions.items()}
+        parsed_examples = [Example(**e) for e in examples_raw]
+        parsed_prompts = PromptsConfig(**prompts_raw) if prompts_raw else None
+        
+        self._config = AgentConfig(
+            states=parsed_states,
+            actions=parsed_actions,
+            examples=parsed_examples,
+            prompts=parsed_prompts,
+        )
+        
+        logger.info(
+            "config_loaded",
+            states=len(parsed_states),
+            actions=len(parsed_actions),
+            examples=len(parsed_examples),
+        )
+        
+        return self._config
+    
+    def _load_yaml(self, filename: str) -> Dict[str, Any]:
+        """Load a YAML file."""
+        path = self.config_dir / filename
+        if not path.exists():
+            logger.warning("config_file_not_found", path=str(path))
+            return {}
+        
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    
+    def reload(self) -> AgentConfig:
+        """Force reload configuration."""
+        self._config = None
+        return self.load()
+
+
+# ============================================================================
+# Intent Classifier
+# ============================================================================
 
 class IntentClassifier:
     """
-    Hybrid intent classifier with regex fast-path and LLM fallback.
+    Config-driven LLM intent classifier.
     
-    Production pattern:
-    1. Try fast regex classification
-    2. If ambiguous, use LLM (adds ~200ms)
-    3. Cache common patterns
+    All behavior defined in YAML:
+    - States, actions, examples, prompts
+    - No hardcoded if/else
     """
     
-    # Fast-path patterns (no LLM needed)
-    REFUSAL_PATTERNS = [
-        r"^no+\.?$",
-        r"^nope\.?$", 
-        r"i (don'?t|do not|won'?t|will not|refuse)",
-        r"(prefer not|rather not|don'?t want)",
-        r"(stop|cancel|end|quit|hang up)",
-    ]
-    
-    CONFIRMATION_PATTERNS = [
-        r"^yes+\.?$",
-        r"^yeah\.?$",
-        r"^yep\.?$",
-        r"^(correct|right|exactly|that'?s? (right|correct))\.?$",
-        r"^(sure|ok|okay|alright)\.?$",
-    ]
-    
-    DENIAL_PATTERNS = [
-        r"^no\.?$",
-        r"(that'?s?|it'?s?) (not |in)?correct",
-        r"(that'?s?|it'?s?) (wrong|not right)",
-        r"(is |was )?(wrong|incorrect|not correct|not right)",
-        r"(wrong|incorrect|mistake)",
-        r"you (got|have|heard) .*(wrong|incorrect)",
-        r"i (didn'?t|did not|never) say",
-        r"i said no",
-    ]
-    
-    CORRECTION_PATTERNS = [
-        r"(change|correct|fix|update) (my|the|it)",
-        r"let me (correct|fix|change)",
-        r"go back",
-        r"(actually|no),? (my|it'?s?|the)",
-        r"my (name|phone|number|date|birthday) is",
-    ]
-    
-    # Name extraction patterns
-    NAME_PATTERNS = [
-        r"(?:my name is|i'm|i am|this is|call me|it's)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-        r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})$",  # Just a name
-    ]
-    
-    def __init__(self, llm: Optional[OllamaLLM] = None):
+    def __init__(
+        self,
+        llm: Optional[OllamaLLM] = None,
+        config_dir: Optional[Path] = None,
+    ):
         self._llm = llm
-        self._llm_initialized = False
+        self.config_loader = ConfigLoader(config_dir)
+        self.config = self.config_loader.load()
+        self._cache: Dict[str, ClassificationResult] = {}
+        
         logger.info("intent_classifier_initialized")
     
     @property
     def llm(self) -> OllamaLLM:
         """Lazy LLM initialization."""
         if self._llm is None:
-            config = LLMConfig(model="llama3.2:latest", temperature=0.1, max_tokens=100)
+            config = LLMConfig(
+                model="llama3.2:latest",
+                temperature=0.1,
+                max_tokens=300,
+            )
             self._llm = OllamaLLM(config)
-            self._llm_initialized = True
         return self._llm
     
     def classify(
-        self, 
-        user_input: str, 
-        context: str = "general",
-        force_llm: bool = False,
+        self,
+        user_input: str,
+        context: Dict[str, Any],
     ) -> ClassificationResult:
         """
-        Classify user intent with fast-path and LLM fallback.
+        Classify user intent using LLM with config-driven behavior.
         
         Args:
             user_input: What the user said
-            context: Current context ("name", "dob", "phone", "day", "time", "confirm")
-            force_llm: Skip fast-path, always use LLM
+            context: Dict with state, last_assistant_message, collected
             
         Returns:
-            ClassificationResult with intent and extracted value
+            ClassificationResult
         """
+        start_time = time.perf_counter()
+        
         text = user_input.strip()
-        lower = text.lower()
+        if not text:
+            return ClassificationResult(
+                intent=UserIntent.UNCLEAR,
+                action=Action.ASK_AGAIN,
+                suggested_response="I didn't catch that. Could you please repeat?",
+                confidence=0.0,
+            )
         
-        if not force_llm:
-            # Fast path: Check clear patterns
-            result = self._fast_classify(text, lower, context)
-            if result and result.confidence > 0.8:
-                logger.debug("fast_path_classification", intent=result.intent.value, confidence=result.confidence)
-                return result
+        # Check cache
+        cache_key = self._cache_key(text, context)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
         
-        # Slow path: Use LLM for ambiguous inputs
-        return self._llm_classify(text, context)
+        # Fast path for unambiguous consent responses
+        result = self._fast_path(text, context)
+        if result:
+            result.latency_ms = (time.perf_counter() - start_time) * 1000
+            self._cache[cache_key] = result
+            return result
+        
+        # LLM classification
+        result = self._llm_classify(text, context)
+        result.latency_ms = (time.perf_counter() - start_time) * 1000
+        self._cache[cache_key] = result
+        
+        return result
     
-    def _fast_classify(self, text: str, lower: str, context: str) -> Optional[ClassificationResult]:
-        """Fast regex-based classification."""
+    def _cache_key(self, text: str, context: Dict[str, Any]) -> str:
+        """Generate cache key."""
+        key = f"{text.lower()}|{context.get('state', '')}|{context.get('last_assistant_message', '')[:50]}"
+        return hashlib.md5(key.encode()).hexdigest()
+    
+    def _fast_path(self, text: str, context: Dict[str, Any]) -> Optional[ClassificationResult]:
+        """Fast path for unambiguous cases (consent only)."""
+        lower = text.lower().strip()
+        state = context.get("state", "")
         
-        # Check refusal FIRST (highest priority)
-        for pattern in self.REFUSAL_PATTERNS:
-            if re.search(pattern, lower):
-                return ClassificationResult(
-                    intent=UserIntent.REFUSING,
-                    confidence=0.95,
-                    used_llm=False,
-                )
-        
-        # Check denial/correction BEFORE name extraction
-        for pattern in self.DENIAL_PATTERNS:
-            if re.search(pattern, lower):
-                # Check if they're also providing a correction value
-                extracted = self._extract_value_from_correction(text, context)
-                return ClassificationResult(
-                    intent=UserIntent.DENYING,
-                    extracted_value=extracted,
-                    confidence=0.9,
-                    used_llm=False,
-                )
-        
-        # Check confirmation
-        for pattern in self.CONFIRMATION_PATTERNS:
-            if re.search(pattern, lower):
+        # Only handle consent stage fast path - everything else needs context
+        if state == "collecting_consent":
+            if lower in ("yes", "yeah", "yep", "sure", "ok", "okay"):
                 return ClassificationResult(
                     intent=UserIntent.CONFIRMING,
+                    action=Action.CONTINUE,
+                    suggested_response=self._get_next_question(state),
+                    confidence=0.95,
+                    used_llm=False,
+                )
+            if lower in ("no", "nope", "no thanks"):
+                return ClassificationResult(
+                    intent=UserIntent.REFUSING,
+                    action=Action.END_CALL,
+                    suggested_response="I understand. If you change your mind, feel free to call back. Have a great day!",
                     confidence=0.95,
                     used_llm=False,
                 )
         
-        # Check correction intent with possible new value
-        for pattern in self.CORRECTION_PATTERNS:
-            match = re.search(pattern, lower)
-            if match:
-                extracted = self._extract_value_from_correction(text, context)
-                return ClassificationResult(
-                    intent=UserIntent.CORRECTING,
-                    extracted_value=extracted,
-                    confidence=0.9,
-                    used_llm=False,
-                )
-        
-        # Context-specific extraction (only if no negative signals)
-        if context == "name":
-            # Skip greetings - not names
-            greetings = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening", "bye", "goodbye"}
-            if lower.strip() in greetings:
-                return None  # Trigger LLM to handle greeting
-            
-            # Skip name extraction if contains negative words
-            if re.search(r"\b(no|not|wrong|incorrect|said no|i said)\b", lower):
-                return None  # Trigger LLM
-            
-            name = self._extract_name_fast(text)
-            if name:
-                return ClassificationResult(
-                    intent=UserIntent.PROVIDING_INFO,
-                    extracted_value=name,
-                    confidence=0.85,
-                    used_llm=False,
-                )
-        
-        # Ambiguous - return None to trigger LLM
         return None
     
-    def _extract_name_fast(self, text: str) -> Optional[str]:
-        """Fast name extraction with basic validation."""
-        # Try patterns
-        for pattern in self.NAME_PATTERNS:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                name = match.group(1).strip().title()
-                # Validation: reasonable name length
-                if 2 <= len(name) <= 50 and len(name.split()) <= 4:
-                    return name
-        
-        # Fallback: clean the input and check if it looks like a name
-        cleaned = re.sub(r"[.,!?]", "", text).strip()
-        words = cleaned.split()
-        
-        # Filter to likely name words
-        name_words = []
-        skip_words = {"the", "is", "my", "and", "to", "a", "an", "for", "of", "um", "uh", 
-                      "yes", "no", "not", "i", "me", "please", "thank", "thanks", "hi", "hello",
-                      "it", "that", "this", "said", "was", "were", "be", "been", "wrong", "correct",
-                      "incorrect", "right", "actually", "but", "so", "just", "like", "dont", "didnt",
-                      "hey", "good", "morning", "afternoon", "evening", "bye", "goodbye", "ok", "okay"}
-        
-        # If input is ONLY a greeting, not a name
-        greetings = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening"}
-        if lower.strip() in greetings or cleaned.lower() in greetings:
-            return None
-        
-        for word in words[:3]:
-            lower_word = word.lower()
-            if lower_word in skip_words:
-                continue
-            if len(word) >= 2 and word[0].isupper() or word.isalpha():
-                name_words.append(word.title())
-        
-        if name_words:
-            name = " ".join(name_words)
-            if 2 <= len(name) <= 50:
-                return name
-        
+    def _get_next_question(self, current_state: str) -> Optional[str]:
+        """Get next question from config."""
+        state_config = self.config.states.get(current_state)
+        if state_config and state_config.transitions:
+            next_state = state_config.transitions.get("on_confirm") or state_config.transitions.get("on_accept")
+            if next_state:
+                next_config = self.config.states.get(next_state)
+                if next_config:
+                    return next_config.question
         return None
     
-    def _extract_value_from_correction(self, text: str, context: str) -> Optional[str]:
-        """Extract the corrected value from correction statement."""
-        lower = text.lower()
-        
-        # Always check for name correction regardless of context
-        # "my name is Jane Doe", "name is actually Jane"
-        name_match = re.search(r"(?:my name is|name is|i'?m|call me)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", text, re.IGNORECASE)
-        if name_match:
-            return name_match.group(1).title()
-        
-        # Check for DOB correction
-        if "birth" in lower or "born" in lower:
-            # Try to find date pattern
-            date_match = re.search(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+ \d{1,2},? \d{4})", text)
-            if date_match:
-                return date_match.group(1)
-        
-        return None
-    
-    def _llm_classify(self, text: str, context: str) -> ClassificationResult:
-        """Use LLM for ambiguous classification."""
-        
-        prompt = f"""Classify this user response in a voice appointment booking system.
-
-Context: Currently asking for {context}
-User said: "{text}"
-
-Classify as ONE of:
-- PROVIDING_INFO: User is giving the requested information
-- REFUSING: User refuses to provide info or wants to stop
-- CORRECTING: User wants to fix/correct previously given info
-- CONFIRMING: User confirms (yes, correct, right)
-- DENYING: User denies (no, that's wrong, incorrect)
-- OFF_TOPIC: User is asking/saying something unrelated
-- UNCLEAR: Cannot determine intent
-
-Also extract the relevant value if PROVIDING_INFO or CORRECTING.
-
-Respond in this exact format:
-INTENT: <intent>
-VALUE: <extracted value or NONE>
-CONFIDENCE: <0.0-1.0>"""
-
+    def _llm_classify(self, text: str, context: Dict[str, Any]) -> ClassificationResult:
+        """LLM-based classification using config-driven prompts."""
         try:
-            messages = [LLMMessage(role="user", content=prompt)]
-            response = self.llm.generate(messages, max_tokens=100).content
+            # Build prompt from config
+            prompts = self.config.prompts
+            if not prompts:
+                raise ValueError("No prompts config found")
             
-            # Parse response
-            intent_match = re.search(r"INTENT:\s*(\w+)", response)
-            value_match = re.search(r"VALUE:\s*(.+?)(?:\n|$)", response)
-            conf_match = re.search(r"CONFIDENCE:\s*([\d.]+)", response)
+            # Build examples string
+            examples_str = self._build_examples(context.get("state", ""))
             
-            intent_str = intent_match.group(1) if intent_match else "UNCLEAR"
-            value = value_match.group(1).strip() if value_match else None
-            confidence = float(conf_match.group(1)) if conf_match else 0.5
+            # Build collected string
+            collected = context.get("collected", {})
+            collected_str = ", ".join(f"{k}: {v}" for k, v in collected.items() if v) or "nothing"
             
-            # Map to enum
-            intent_map = {
-                "PROVIDING_INFO": UserIntent.PROVIDING_INFO,
-                "REFUSING": UserIntent.REFUSING,
-                "CORRECTING": UserIntent.CORRECTING,
-                "CONFIRMING": UserIntent.CONFIRMING,
-                "DENYING": UserIntent.DENYING,
-                "OFF_TOPIC": UserIntent.OFF_TOPIC,
-                "UNCLEAR": UserIntent.UNCLEAR,
-            }
-            
-            intent = intent_map.get(intent_str.upper(), UserIntent.UNCLEAR)
-            
-            # Clean value
-            if value and value.upper() in ("NONE", "N/A", ""):
-                value = None
-            
-            logger.info(
-                "llm_classification",
-                text=text[:50],
-                intent=intent.value,
-                value=value[:20] if value else None,
-                confidence=confidence,
+            # Format user prompt
+            user_prompt = prompts.user_prompt_template.format(
+                examples=examples_str,
+                last_assistant_message=context.get("last_assistant_message", ""),
+                user_input=text,
+                state=context.get("state", "unknown"),
+                collected=collected_str,
             )
             
-            return ClassificationResult(
-                intent=intent,
-                extracted_value=value,
-                confidence=confidence,
-                used_llm=True,
-            )
+            messages = [
+                LLMMessage(role="system", content=prompts.system_prompt),
+                LLMMessage(role="user", content=user_prompt),
+            ]
+            
+            response = self.llm.generate(messages, max_tokens=300).content
+            
+            # Parse JSON response
+            return self._parse_response(response, text)
             
         except Exception as e:
             logger.error("llm_classification_failed", error=str(e))
-            return ClassificationResult(
-                intent=UserIntent.UNCLEAR,
-                confidence=0.0,
-                used_llm=True,
-            )
+            return self._fallback_result(context)
+    
+    def _build_examples(self, current_state: str, max_examples: int = 5) -> str:
+        """Build examples string, prioritizing current state."""
+        prompts = self.config.prompts
+        if not prompts:
+            return ""
+        
+        # Prioritize examples for current state
+        state_examples = [e for e in self.config.examples if e.context.state == current_state]
+        other_examples = [e for e in self.config.examples if e.context.state != current_state]
+        
+        selected = state_examples[:3] + other_examples[:max_examples - len(state_examples[:3])]
+        
+        formatted = []
+        for ex in selected:
+            output = {
+                "intent": ex.classification.intent,
+                "action": ex.classification.action,
+                "extracted_value": ex.classification.extracted_value,
+                "field_to_correct": ex.classification.field_to_correct,
+                "suggested_response": ex.classification.suggested_response,
+                "confidence": ex.classification.confidence,
+            }
+            formatted.append(prompts.example_format.format(
+                assistant=ex.context.assistant,
+                user=ex.user,
+                state=ex.context.state,
+                output=json.dumps(output),
+            ))
+        
+        return "Examples:\n\n" + "\n\n".join(formatted)
+    
+    def _parse_response(self, response: str, user_input: str) -> ClassificationResult:
+        """Parse LLM JSON response."""
+        # Extract JSON - handle multiline by finding balanced braces
+        start = response.find('{')
+        if start == -1:
+            raise ValueError(f"No JSON in response: {response[:100]}")
+        
+        # Find matching closing brace
+        depth = 0
+        end = start
+        for i, c in enumerate(response[start:], start):
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        
+        json_str = response[start:end]
+        data = json.loads(json_str)
+        
+        # Validate and convert
+        intent_str = data.get("intent", "unclear")
+        action_str = data.get("action", "ask_again")
+        
+        # Handle invalid enum values gracefully
+        try:
+            intent = UserIntent(intent_str)
+        except ValueError:
+            logger.warning("invalid_intent", value=intent_str)
+            intent = UserIntent.UNCLEAR
+        
+        try:
+            action = Action(action_str)
+        except ValueError:
+            logger.warning("invalid_action", value=action_str)
+            action = Action.ASK_AGAIN
+        
+        result = ClassificationResult(
+            intent=intent,
+            action=action,
+            extracted_value=data.get("extracted_value"),
+            field_to_correct=data.get("field_to_correct"),
+            suggested_response=data.get("suggested_response"),
+            confidence=float(data.get("confidence", 0.7)),
+            used_llm=True,
+        )
+        
+        logger.info(
+            "llm_classification",
+            text=user_input[:50],
+            intent=result.intent.value,
+            action=result.action.value,
+            confidence=result.confidence,
+        )
+        
+        return result
+    
+    def _fallback_result(self, context: Dict[str, Any]) -> ClassificationResult:
+        """Fallback when LLM fails."""
+        state = context.get("state", "")
+        state_config = self.config.states.get(state)
+        
+        if state_config and state_config.question:
+            question = state_config.question
+        else:
+            question = "Could you please repeat that?"
+        
+        return ClassificationResult(
+            intent=UserIntent.UNCLEAR,
+            action=Action.ASK_AGAIN,
+            suggested_response=f"I'm sorry, I didn't catch that. {question}",
+            confidence=0.0,
+            used_llm=True,
+        )
+    
+    def get_state_config(self, state: str) -> Optional[StateConfig]:
+        """Get state configuration."""
+        return self.config.states.get(state)
+    
+    def get_action_config(self, action: str) -> Optional[ActionConfig]:
+        """Get action configuration."""
+        return self.config.actions.get(action)
+    
+    def reload_config(self):
+        """Reload configuration from files."""
+        self.config = self.config_loader.reload()
+        self._cache.clear()
+        logger.info("config_reloaded")
