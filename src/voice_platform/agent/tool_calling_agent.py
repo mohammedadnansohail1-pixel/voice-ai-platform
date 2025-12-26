@@ -13,6 +13,7 @@ import re
 import uuid
 
 from .extractors.slot_extractor import SlotExtractor, ExtractedSlots, ConfirmationType
+from .extractors.intent_classifier import IntentClassifier, UserIntent, ClassificationResult
 from .extractors.llm_slot_extractor import LLMSlotExtractor
 from .tools.appointment import AppointmentTools, ToolResponse
 from ..llm.ollama import OllamaLLM
@@ -195,27 +196,47 @@ class ToolCallingAgent:
     # === PATIENT INFO HANDLERS ===
     
     def _check_correction_intent(self, user_input: str) -> Optional[AgentResponse]:
-        """Check for correction intent globally - user wants to fix something."""
-        lower_input = user_input.lower()
+        """Check for correction/refusal intent using hybrid classifier."""
+        # Get current context for classification
+        context_map = {
+            AgentState.COLLECTING_NAME: "name",
+            AgentState.COLLECTING_DOB: "dob", 
+            AgentState.COLLECTING_PHONE: "phone",
+            AgentState.COLLECTING_DAY: "day",
+            AgentState.COLLECTING_TIME: "time",
+            AgentState.CONFIRMING: "confirm",
+        }
+        context = context_map.get(self.context.state, "general")
         
-        # Patterns indicating user wants to correct something
-        correction_patterns = [
-            r"(name|that).*(wrong|incorrect|not right|mistake)",
-            r"(wrong|incorrect|not right).*(name|that)",
-            r"you (got|have) .*(wrong|incorrect)",
-            r"that's not (my|correct|right)",
-            r"i (didn't|did not) say",
-            r"(change|correct|fix|update) (my|the)",
-            r"let me (correct|fix|change)",
-            r"go back",
-        ]
+        # Classify intent (fast-path + LLM fallback)
+        result = self.intent_classifier.classify(user_input, context)
         
-        for pattern in correction_patterns:
-            if re.search(pattern, lower_input):
-                logger.info("correction_intent_detected", pattern=pattern)
-                return self._handle_correction_request(lower_input)
+        if result.intent == UserIntent.CORRECTING:
+            logger.info("correction_intent_detected", confidence=result.confidence, used_llm=result.used_llm)
+            return self._handle_correction_request(user_input, result.extracted_value)
+        
+        if result.intent == UserIntent.REFUSING:
+            logger.info("refusal_detected", confidence=result.confidence)
+            return self._handle_refusal()
+        
+        if result.intent == UserIntent.DENYING and self.context.state != AgentState.CONFIRMING:
+            # User says "no/wrong" but we're not in confirmation - they want to correct
+            logger.info("denial_as_correction", confidence=result.confidence)
+            return self._handle_correction_request(user_input, result.extracted_value)
         
         return None
+    
+    def _handle_refusal(self) -> AgentResponse:
+        """Handle user refusing to continue."""
+        if self.context.state == AgentState.COLLECTING_CONSENT:
+            self.context.state = AgentState.COMPLETE
+            return AgentResponse(
+                text="I understand. If you change your mind, feel free to call back. Goodbye!"
+            )
+        else:
+            return AgentResponse(
+                text="Would you like to cancel this appointment booking? Say yes to cancel or no to continue."
+            )
     
     def _handle_correction_request(self, user_input: str) -> AgentResponse:
         """Handle user wanting to correct information."""
