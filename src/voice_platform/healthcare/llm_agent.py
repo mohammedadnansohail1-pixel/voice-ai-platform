@@ -7,7 +7,7 @@ from enum import Enum
 from ..llm import OllamaLLM
 from ..core.types import LLMMessage
 from ..logging import get_logger
-from ..conversation.guardrails import ConversationGuardrails, GuardrailAction
+from ..agent.guardrails import ConversationGuardrails, GuardrailAction
 
 logger = get_logger("healthcare.llm_agent")
 

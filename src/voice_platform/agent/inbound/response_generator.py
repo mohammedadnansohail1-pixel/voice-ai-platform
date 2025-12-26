@@ -11,7 +11,7 @@ from typing import Optional, Any
 from dataclasses import dataclass
 
 from ...logging import get_logger
-from ...conversation.guardrails import (
+from ..guardrails import (
     ConversationGuardrails,
     GuardrailAction,
     GuardrailResult,

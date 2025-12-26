@@ -21,8 +21,7 @@ from ..channels.websocket import WebSocketChannel
 from ..channels.twilio import TwilioChannel
 from ..channels.freeswitch import FreeSwitchChannel
 from ..audio.accumulator import SpeechAccumulator
-from ..engine.streaming import StreamingPipeline
-from ..flows import load_flows_from_directory, FlowEngine
+from ..llm.streaming import StreamingPipeline
 from .routes.telephony import router as telephony_router
 from .routes.healthcare import router as healthcare_router
 
@@ -39,7 +38,7 @@ class VoicePlatformApp:
         self.llm: Optional[OllamaLLM] = None
         self.tts: Optional[KokoroTTS] = None
         self.audit: Optional[AuditLogger] = None
-        self.flow_engine: Optional[FlowEngine] = None
+        self.flow_engine = None
         self.is_loaded = False
 
     def load_models(self) -> None:
@@ -58,11 +57,7 @@ class VoicePlatformApp:
             audit_path=self.config.logging.audit_path,
         )
 
-        flows_dir = Path("configs/flows")
-        if flows_dir.exists():
-            flows = load_flows_from_directory(flows_dir)
-            self.flow_engine = FlowEngine(flows, llm=self.llm)
-
+        self.flow_engine = None
         self.is_loaded = True
         logger.info("models_loaded")
 

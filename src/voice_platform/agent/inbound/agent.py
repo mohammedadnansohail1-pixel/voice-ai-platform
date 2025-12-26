@@ -20,7 +20,7 @@ from typing import Any, Optional
 from ...core.config import Config
 from ...core.types import LLMMessage
 from ...logging import get_logger, AuditLogger
-from ...conversation.guardrails import GuardrailAction
+from ..guardrails import GuardrailAction
 from ..base import BaseAgent, AgentResponse
 from ..states import InboundAgentState, INBOUND_STATE_MACHINE, StateConfig
 from ..context import InboundAgentContext, PatientInfo, AppointmentInfo

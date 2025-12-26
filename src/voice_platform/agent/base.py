@@ -28,6 +28,14 @@ logger = get_logger("agent.base")
 # =============================================================================
 
 @dataclass
+class Stage(str, Enum):
+    """Conversation stage for external interfaces."""
+    GREETING = "greeting"
+    COLLECTING = "collecting"
+    CONFIRMING = "confirming"
+    DONE = "done"
+
+
 class AgentResponse:
     """Response from agent processing."""
     text: str

@@ -6,7 +6,7 @@ from verify_core import PatientIdentity
 
 from .appointment_service import AppointmentService, AppointmentResult, AppointmentStage
 from .extraction_pipeline import HealthcareExtractionPipeline
-from ..conversation.schemas import AgentResponse, Stage
+from ..agent.base import AgentResponse, Stage
 from ..logging import get_logger
 
 logger = get_logger("healthcare.agent")
