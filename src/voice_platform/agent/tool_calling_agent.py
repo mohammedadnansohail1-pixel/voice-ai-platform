@@ -231,7 +231,27 @@ class ToolCallingAgent:
             logger.info("denial_as_correction", confidence=result.confidence)
             return self._handle_correction_request(user_input, result.extracted_value)
         
+        if result.intent == UserIntent.OFF_TOPIC:
+            # User said something off-topic, gently redirect
+            logger.info("off_topic_detected", confidence=result.confidence)
+            return self._redirect_to_current_question()
+        
         return None
+    
+    def _redirect_to_current_question(self) -> AgentResponse:
+        """Redirect user back to current question."""
+        redirects = {
+            AgentState.COLLECTING_CONSENT: "Do I have your consent to continue?",
+            AgentState.COLLECTING_NAME: "May I have your full name please?",
+            AgentState.COLLECTING_DOB: "What is your date of birth?",
+            AgentState.COLLECTING_PHONE: "What's the best phone number to reach you?",
+            AgentState.COLLECTING_REASON: "What brings you in today?",
+            AgentState.COLLECTING_DAY: "What day works for you?",
+            AgentState.COLLECTING_TIME: "What time works for you?",
+            AgentState.CONFIRMING: "Should I book this appointment?",
+        }
+        question = redirects.get(self.context.state, "How can I help you?")
+        return AgentResponse(text=question)
     
     def _handle_refusal(self) -> AgentResponse:
         """Handle user refusing to continue."""

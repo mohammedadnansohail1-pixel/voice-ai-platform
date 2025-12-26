@@ -182,6 +182,11 @@ class IntentClassifier:
         
         # Context-specific extraction (only if no negative signals)
         if context == "name":
+            # Skip greetings - not names
+            greetings = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening", "bye", "goodbye"}
+            if lower.strip() in greetings:
+                return None  # Trigger LLM to handle greeting
+            
             # Skip name extraction if contains negative words
             if re.search(r"\b(no|not|wrong|incorrect|said no|i said)\b", lower):
                 return None  # Trigger LLM
@@ -218,7 +223,13 @@ class IntentClassifier:
         skip_words = {"the", "is", "my", "and", "to", "a", "an", "for", "of", "um", "uh", 
                       "yes", "no", "not", "i", "me", "please", "thank", "thanks", "hi", "hello",
                       "it", "that", "this", "said", "was", "were", "be", "been", "wrong", "correct",
-                      "incorrect", "right", "actually", "but", "so", "just", "like", "dont", "didnt"}
+                      "incorrect", "right", "actually", "but", "so", "just", "like", "dont", "didnt",
+                      "hey", "good", "morning", "afternoon", "evening", "bye", "goodbye", "ok", "okay"}
+        
+        # If input is ONLY a greeting, not a name
+        greetings = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening"}
+        if lower.strip() in greetings or cleaned.lower() in greetings:
+            return None
         
         for word in words[:3]:
             lower_word = word.lower()
